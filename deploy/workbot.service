@@ -1,0 +1,25 @@
+[Unit]
+Description=Personal work Telegram bot (aiogram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=workbot
+Group=workbot
+WorkingDirectory=/opt/workbot
+ExecStart=/opt/workbot/.venv/bin/python main.py
+Environment=PYTHONUNBUFFERED=1
+
+Restart=always
+RestartSec=5
+
+# Базовая изоляция: писать можно только в папку проекта (БД, storage/, tmp/)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/workbot
+
+[Install]
+WantedBy=multi-user.target
