@@ -15,10 +15,16 @@ from database import Database
 from handlers import get_routers
 from middlewares import AdminOnlyMiddleware
 from scheduler import setup_scheduler
+from workspace_db import initialize, notify_deadlines
 
 log = logging.getLogger("workbot")
 
 COMMANDS = [
+    BotCommand(command='menu', description='Главное меню'),
+    BotCommand(command='sections', description='Разделы базы знаний'),
+    BotCommand(command='deadlines', description='Мои дедлайны'),
+    BotCommand(command='deadline', description='Добавить дедлайн'),
+    BotCommand(command='reindex', description='OCR старых скриншотов'),
     BotCommand(command="find", description="Поиск по базе: /find запрос"),
     BotCommand(command="timer", description="Таймер задачи: /timer название"),
     BotCommand(command="stats", description="Тайминги за неделю (.xlsx)"),
@@ -45,6 +51,7 @@ async def main() -> None:
 
     db = Database(settings.db_path)
     await db.connect()
+    await initialize(db)
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
@@ -60,6 +67,9 @@ async def main() -> None:
         dp.include_router(router)
 
     scheduler = setup_scheduler(bot, db, settings)
+    scheduler.add_job(notify_deadlines, 'interval', minutes=1,
+                      args=[bot, db, settings], id='deadline_reminders',
+                      replace_existing=True, max_instances=1, coalesce=True)
     scheduler.start()
     log.info("Бэкап по расписанию: %02d:%02d (%s)", settings.backup_hour, settings.backup_minute, settings.tz_name)
 

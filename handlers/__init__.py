@@ -1,10 +1,7 @@
-"""Сборка роутеров. Порядок важен: catch-all обработчик контента — последним."""
+"""Маршруты: меню/FSM раньше универсального приёма, файл обработчики последними."""
 from __future__ import annotations
-
 from aiogram import Router
-
-from . import common, content, search, timers
-
+from . import workspace, ingest, common, search, timers, content
 
 def get_routers() -> list[Router]:
-    return [common.router, search.router, timers.router, content.router]
+    return [workspace.router, ingest.router, common.router, search.router, timers.router, content.router]

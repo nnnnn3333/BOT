@@ -5,3 +5,4 @@ __pycache__/
 work_base.db*
 storage/
 tmp/
+.workbot_upgrade_backup/
