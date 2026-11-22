@@ -404,9 +404,18 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
         await state.clear()
         from handlers.timers import render_timer, timer_keyboard
         return await _show(cb, render_timer(row), timer_keyboard(id_))
-    if a == "root":
+    if a == "sections":
+        await state.clear()
         title, kb = await browse_roots(db)
         return await _show(cb, title, kb)
+    if a == "root":
+        await state.clear()
+        await cb.answer()
+        if isinstance(cb.message, Message):
+            await send_menu(cb.message)
+        return
+    if a in {"section", "items", "active", "card", "deadlines"}:
+        await state.clear()
     if a in {"section", "items", "active"}:
         section = await get_section(db, id_) if id_ else None
         if id_ and not section:
@@ -430,10 +439,10 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
         if section:
             if section["parent_id"] is None:
                 kb.row(btn("➕ Подраздел", "newsec", id_))
-            kb.row(btn("‹ Разделы", "root" if section["parent_id"] is None else "section",
+            kb.row(btn("‹ Разделы", "sections" if section["parent_id"] is None else "section",
                        section["parent_id"] or 0))
         else:
-            kb.row(btn("‹ Разделы", "root"))
+            kb.row(btn("‹ Разделы", "sections"))
         title = ("🟢 Действующие предложения" if a == "active" else
                  f"📁 {esc(section['name'])}" if section else "📄 Последние записи")
         description = f"Страница {page + 1} · Выберите запись." if rows else "Записей пока нет."

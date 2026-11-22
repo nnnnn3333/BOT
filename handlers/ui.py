@@ -116,4 +116,5 @@ class NavigationMiddleware(BaseMiddleware):
             state = data.get("state")
             if state is not None:
                 await state.clear()
+                data["raw_state"] = None
         return await handler(event, data)

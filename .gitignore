@@ -6,3 +6,32 @@ work_base.db*
 storage/
 tmp/
 .workbot_upgrade_backup/
+
+# Secrets and local settings
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# Persistent and exported user data
+data/
+backups/
+backup/
+exports/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.zip
+*.zip.*
+*.tar
+*.tar.gz
+*.bak
+*.log
+
+# Local development environments
+venv/

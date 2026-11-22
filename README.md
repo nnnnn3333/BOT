@@ -47,7 +47,7 @@ sudo cat /etc/workbot/deploy_key.pub     # вставить в GitHub: репо�
 
 # клонируем код
 SSH_CMD='ssh -i /etc/workbot/deploy_key -o UserKnownHostsFile=/etc/workbot/known_hosts -o StrictHostKeyChecking=accept-new'
-sudo -u workbot git clone -c core.sshCommand="$SSH_CMD" git@github.com:nnnnn3333/BOT.git /opt/workbot
+sudo -u workbot git clone -c core.sshCommand="$SSH_CMD" git@github.com:YOUR_GITHUB_ACCOUNT/YOUR_REPOSITORY.git /opt/workbot
 
 # окружение
 sudo -u workbot python3 -m venv /opt/workbot/.venv
@@ -121,7 +121,7 @@ Workbot 2 добавляет удобное меню Telegram, дерево ра
 запуском сделайте полный бэкап базы и скриншотов (`/backup`), остановите сервис.
 
 1. Распакуйте архив обновления. Склонируйте исходный проект, если его нет локально:
-   `git clone https://github.com/nnnnn3333/BOT.git`
+   `git clone https://github.com/YOUR_GITHUB_ACCOUNT/YOUR_REPOSITORY.git`
 2. Запустите из папки распакованного обновления:
    `python apply_upgrade.py /путь/к/BOT`
    На Windows можно использовать `py apply_upgrade.py C:\\путь\\BOT`.

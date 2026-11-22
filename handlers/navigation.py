@@ -12,6 +12,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 log = logging.getLogger(__name__)
 _current = ContextVar("workbot_screen", default=None)
 _keyboards = {}
+_anchors = {}
 
 
 @dataclass
@@ -35,8 +36,13 @@ class ScreenRequests(BaseRequestMiddleware):
         if screen is None:
             return result
         messages = result if isinstance(result, list) else [result]
+        track = method.__api_method__ != "editMessageReplyMarkup"
         for message in messages:
-            if isinstance(message, Message) and message.chat.id == screen.chat:
+            if track and isinstance(message, Message) and message.chat.id == screen.chat:
+                if isinstance(markup, ReplyKeyboardMarkup) and getattr(method, "text", "") in {
+                    "Меню", "Ввод данных · Отмена или возврат в меню"
+                }:
+                    _anchors[screen.chat] = message.message_id
                 screen.messages.add(message.message_id)
                 await self.db.conn.execute(
                     "INSERT OR IGNORE INTO ui_messages(chat, message) VALUES (?, ?)",
@@ -44,7 +50,7 @@ class ScreenRequests(BaseRequestMiddleware):
                 )
                 await self.db.conn.commit()
         # Telegram sometimes returns True for message edits.
-        if method.__api_method__.startswith("editMessage"):
+        if method.__api_method__ in ("editMessageText", "editMessageCaption", "editMessageMedia"):
             if getattr(method, "chat_id", None) == screen.chat:
                 message_id = getattr(method, "message_id", None)
                 if message_id:
@@ -77,16 +83,16 @@ class ScreenNavigation(BaseMiddleware):
                 if screen.messages:
                     state = data.get("state")
                     mode = "input" if state and await state.get_state() else "menu"
-                    if _keyboards.get(screen.chat) != mode:
+                    if _keyboards.get(screen.chat) != mode or screen.chat not in _anchors:
                         from handlers.workspace import MENU
                         keyboard = MENU
-                        prompt = "Выберите действие в нижнем меню."
+                        prompt = "Меню"
                         if mode == "input":
                             keyboard = ReplyKeyboardMarkup(
                                 keyboard=[[KeyboardButton(text="❌ Отмена"), KeyboardButton(text="🏠 Меню")]],
                                 resize_keyboard=True, is_persistent=True, one_time_keyboard=False,
                             )
-                            prompt = "Введите ответ. Для выхода доступны кнопки внизу."
+                            prompt = "Ввод данных · Отмена или возврат в меню"
                         await data["bot"].send_message(screen.chat, prompt, reply_markup=keyboard)
                         _keyboards[screen.chat] = mode
                     await self.clean(data["bot"], screen)
@@ -111,7 +117,7 @@ class ScreenNavigation(BaseMiddleware):
         ) as cursor:
             previous = [row[0] for row in await cursor.fetchall()]
         for message_id in previous:
-            if message_id not in screen.messages:
+            if message_id not in screen.messages and message_id != _anchors.get(screen.chat):
                 if await self.remove(bot, screen.chat, message_id):
                     await self.db.conn.execute(
                         "DELETE FROM ui_messages WHERE chat = ? AND message = ?",
