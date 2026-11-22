@@ -52,6 +52,11 @@ async def _render(message, text, markup, photo=None):
             except TelegramBadRequest as error:
                 if "message is not modified" in str(error).lower():
                     return message
+                if "not found" in str(error).lower():
+                    from handlers.navigation import _anchors, _keyboards
+                    _anchors.pop(chat, None)
+                    _keyboards.pop(chat, None)
+                    _media.discard((chat, previous))
         if photo:
             sent = await message.answer_photo(FSInputFile(photo), caption=text,
                                               parse_mode="HTML", reply_markup=markup)
@@ -112,6 +117,13 @@ class NavigationMiddleware(BaseMiddleware):
         }
         text = (event.text or "").strip()
         command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
+        if command in {"/start", "/menu"} or text == "🏠 Меню":
+            chat = event.chat.id
+            _screens.pop(chat, None)
+            _media.difference_update(key for key in list(_media) if key[0] == chat)
+            from handlers.navigation import _anchors, _keyboards
+            _anchors.pop(chat, None)
+            _keyboards.pop(chat, None)
         if text in labels or command in commands:
             state = data.get("state")
             if state is not None:
