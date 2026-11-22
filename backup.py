@@ -15,6 +15,7 @@ from aiogram.types import FSInputFile
 from config import TG_UPLOAD_LIMIT, Settings
 from database import Database
 from utils import esc
+from handlers.navigation import preserve_messages
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,11 @@ async def send_backup(bot: Bot, db: Database, settings: Settings) -> None:
         await bot.send_message(settings.admin_id, "⏳ Бэкап уже выполняется.")
         return
 
+    with preserve_messages():
+        await _send_backup(bot, db, settings)
+
+
+async def _send_backup(bot, db, settings):
     async with _lock:
         settings.tmp_dir.mkdir(parents=True, exist_ok=True)
         workdir = Path(tempfile.mkdtemp(prefix="backup_", dir=settings.tmp_dir))
@@ -61,6 +67,9 @@ async def send_backup(bot: Bot, db: Database, settings: Settings) -> None:
 
             await db.snapshot(snapshot)
             await asyncio.to_thread(_write_zip, archive, snapshot, settings.storage_dir)
+            with zipfile.ZipFile(archive) as checked:
+                if checked.testzip() is not None:
+                    raise ValueError("Повреждена резервная копия")
             snapshot.unlink(missing_ok=True)
             parts = await asyncio.to_thread(_split_if_needed, archive)
 
@@ -78,6 +87,11 @@ async def send_backup(bot: Bot, db: Database, settings: Settings) -> None:
                     caption=caption,
                     request_timeout=600,
                 )
+            await db.conn.execute(
+                "INSERT OR REPLACE INTO work_system(key,value) VALUES ('last_backup',?)",
+                (datetime.now(settings.tz).isoformat(timespec="seconds"),),
+            )
+            await db.conn.commit()
             log.info("Бэкап отправлен (%d файл(ов))", len(parts))
         except Exception as exc:
             log.exception("Бэкап не удался")

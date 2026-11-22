@@ -69,12 +69,14 @@ def load_settings() -> Settings:
 
     backup_hour, backup_minute = _parse_hhmm(os.getenv("BACKUP_TIME", "03:00"))
 
+    data_dir = _path_from_env("DATA_DIR", ".") if os.getenv("DATA_DIR", "").strip() else BASE_DIR
+
     return Settings(
         bot_token=token,
         admin_id=int(admin_raw),
-        db_path=_path_from_env("DB_PATH", "work_base.db"),
-        storage_dir=_path_from_env("STORAGE_DIR", "storage"),
-        tmp_dir=_path_from_env("TMP_DIR", "tmp"),
+        db_path=_path_from_env("DB_PATH", str(data_dir / "work_base.db")),
+        storage_dir=_path_from_env("STORAGE_DIR", str(data_dir / "storage")),
+        tmp_dir=_path_from_env("TMP_DIR", str(data_dir / "tmp")),
         tz_name=tz_name,
         tz=tz,
         backup_hour=backup_hour,

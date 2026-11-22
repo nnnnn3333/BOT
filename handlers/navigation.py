@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from contextvars import ContextVar
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from aiogram import BaseMiddleware
@@ -19,6 +20,22 @@ _anchors = {}
 class Screen:
     chat: int
     messages: set = field(default_factory=set)
+    saved_input: bool = False
+
+
+def mark_saved_input():
+    screen = _current.get()
+    if screen is not None:
+        screen.saved_input = True
+
+
+@contextmanager
+def preserve_messages():
+    token = _current.set(None)
+    try:
+        yield
+    finally:
+        _current.reset(token)
 
 
 class ScreenRequests(BaseRequestMiddleware):
@@ -97,8 +114,15 @@ class ScreenNavigation(BaseMiddleware):
                         _keyboards[screen.chat] = mode
                     await self.clean(data["bot"], screen)
                     if incoming:
-                        # Uploaded originals have already been stored by the handler.
-                        await self.remove(data["bot"], screen.chat, incoming.message_id)
+                        text = (incoming.text or "").strip()
+                        command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
+                        from handlers.workspace import MENU
+                        labels = {button.text for row in MENU.keyboard for button in row}
+                        labels.update({"🏠 Меню", "❌ Отмена"})
+                        commands = {"/start", "/menu", "/cancel", "/sections", "/find", "/deadline",
+                                    "/deadlines", "/timer", "/stats", "/backup", "/help", "/reindex"}
+                        if screen.saved_input or text in labels or command in commands:
+                            await self.remove(data["bot"], screen.chat, incoming.message_id)
                 return result
             finally:
                 _current.reset(token)

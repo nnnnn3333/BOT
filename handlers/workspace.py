@@ -22,7 +22,8 @@ from handlers.ui import show_text, show_card
 from workspace_db import (add_deadline, create_section, delete_item, get_item, get_section,
                           list_deadlines, list_items, list_sections, parse_datetime,
                           remove_deadline, search_items, set_deadline_done, update_item,
-                          mark_ocr_processed, pending_screens)
+                          mark_ocr_processed, pending_screens, set_favorite, remember_browse,
+                          browse_context, reschedule_deadline)
 
 router = Router(name="workspace")
 
@@ -70,11 +71,14 @@ def btn(text: str, action: str, id: int = 0, page: int = 0, item: int = 0) -> In
     return InlineKeyboardButton(text=text, callback_data=WS(action=action, id=id, page=page, item=item).pack())
 
 
-def card_keyboard(item_id: int, has_file: bool = False) -> InlineKeyboardMarkup:
+def card_keyboard(item_id: int, has_file: bool = False, favorite: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [btn("✏️ Редактировать", "edit", item_id), btn("📁 Переместить", "choose", item=item_id)],
         [btn("📅 Срок действия", "input", item_id, page=2), btn("💰 Цена", "input", item_id, page=1)],
     ]
+    rows.append([btn("★ В избранном" if favorite else "☆ В избранное",
+                     "unstar" if favorite else "star", item_id)])
+    rows.append([btn("‹ К списку", "return", item_id)])
     rows.append([btn("🗑 Удалить", "delask", item_id), btn("🏠 В меню", "root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -84,8 +88,8 @@ def _short(value: str, max_len: int = 65) -> str:
     return text if len(text) <= max_len else text[:max_len - 1] + "…"
 
 
-def card_text(row, settings: Settings, content_limit: int = 900, compact: bool = False) -> str:
-    lines = [f"<b>#{row['id']} · {esc(_short(row['title'], 100) if compact else row['title'])}</b>", f"📁 {esc(row['section_name'])}\n"]
+def card_text(row, settings: Settings) -> str:
+    lines = [f"<b>#{row['id']} · {esc(row['title'])}</b>", f"📁 {esc(row['section_name'])}\n"]
     if row["price"]:
         lines.append(f"💰 {esc(row['price'])}")
     if row["valid_until"]:
@@ -93,9 +97,9 @@ def card_text(row, settings: Settings, content_limit: int = 900, compact: bool =
         marker = "🔴 Истёк" if row["valid_until"] < today else "🟢 Действует"
         lines.append(f"📅 До {esc(row['valid_until'])} · {marker}")
     if row["details"]:
-        lines.append(f"📋 {esc(_short(row['details'], 400))}")
+        lines.append(f"📋 {esc(row['details'])}")
     if row["content"]:
-        lines.append("\n<b>Содержимое:</b>\n" + (esc(_short(row["content"], content_limit)) if content_limit else "Текст записи сокращён для подписи к фото."))
+        lines.append("\n<b>Содержимое:</b>\n" + esc(row["content"]))
     else:
         lines.append("\nТекст не указан")
     return "\n".join(lines)
@@ -131,13 +135,17 @@ async def backup_button(message: Message, bot: Bot, db: Database, settings: Sett
 
 
 @router.message(F.text == "❓ Помощь")
-async def help_button(message: Message) -> None:
+async def help_button(message: Message, db: Database) -> None:
+    async with db.conn.execute("SELECT value FROM work_system WHERE key='last_backup'") as cursor:
+        backup = await cursor.fetchone()
+    backup_status = esc(backup[0]) if backup else "ещё не отправлялась"
     await show_text(
         message,
         "<b>❓ Помощь</b>\n\n"
         "Выбирайте действия в нижнем меню.\n"
         "Чтобы сохранить заметку, фото или документ, отправьте их в чат.\n"
-        "При вводе данных нижнее меню заменяется кнопками отмены и возврата.",
+        "При вводе данных нижнее меню заменяется кнопками отмены и возврата.\n\n"
+        f"Последняя отправленная резервная копия: {backup_status}",
     )
 
 
@@ -153,6 +161,8 @@ async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
     for section in await list_sections(db):
         kb.row(btn(f"📁 {section['name']}", "section", section["id"]))
     kb.row(btn("🕓 Последние записи", "items"), btn("🟢 Сроки действуют", "active"))
+    kb.row(btn("⭐ Избранное", "favorite"), btn("📅 Сроки сегодня", "today"))
+    kb.row(btn("Завтра", "tomorrow"), btn("В ближайшие 3 дня", "soon"))
     kb.row(btn("➕ Новый раздел", "newsec"))
     return "<b>🗂 База знаний</b>\n\nВыбери раздел или открой последние записи.", kb.as_markup()
 
@@ -180,6 +190,7 @@ async def ask_search(message: Message, state: FSMContext) -> None:
 
 
 async def send_search(message: Message, db: Database, settings: Settings, query: str) -> None:
+    await remember_browse(db, message.chat.id, "search", query=query)
     results = await search_items(db, query)
     if not results:
         await show_text(message, f"По запросу «{esc(query)}» ничего не нашлось.")
@@ -211,28 +222,35 @@ async def find_text(message: Message, state: FSMContext, db: Database, settings:
     await send_search(message, db, settings, message.text.strip()[:150])
 
 
-async def show_deadlines(message: Message, db: Database, settings: Settings) -> None:
-    rows = await list_deadlines(db)
+async def deadline_screen(db, settings, page=0):
+    rows = await list_deadlines(db, limit=9, page=page, page_size=8)
+    more = len(rows) > 8
+    rows = rows[:8]
     kb = InlineKeyboardBuilder()
+    lines = ["<b>📅 Дедлайны</b>", ""]
     for row in rows:
         due = datetime.strptime(row["due_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         local = due.astimezone(settings.tz)
+        marker = "🔴" if due < datetime.now(timezone.utc) else "⏳"
+        lines.append(f"{marker} #{row['id']} · {esc(_short(row['title'], 100))} · {local:%d.%m.%Y %H:%M}")
         kb.row(btn(f"✅ #{row['id']}", "done", row["id"]),
-               btn("✏️", "dedit", row["id"]), btn("🗑", "ddelask", row["id"]))
-    text_lines = ["<b>📅 Дедлайны</b>"]
-    for row in rows:
-        due = datetime.strptime(row["due_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-        local = due.astimezone(settings.tz)
-        remain = due - datetime.now(timezone.utc)
-        marker = "🔴" if remain.total_seconds() < 0 else "⏳"
-        hours = int(abs(remain.total_seconds()) // 3600)
-        countdown = f"{hours // 24} д. {hours % 24} ч."
-        status = "просрочено на " if remain.total_seconds() < 0 else "осталось "
-        text_lines.append(f"{marker} <b>#{row['id']} {esc(_short(row['title'], 90))}</b> · {local:%d.%m.%Y %H:%M} ({status}{countdown})")
+               btn("✏️ Перенести", "dedit", row["id"]), btn("🗑 Удалить", "ddelask", row["id"]))
     if not rows:
-        text_lines.append("Пока нет активных дедлайнов.")
-    kb.row(btn("➕ Добавить дедлайн", "newdeadline"), btn("🏠 Назад", "root"))
-    await show_text(message, "\n".join(text_lines)[:4000], reply_markup=kb.as_markup())
+        lines.append("Нет активных дедлайнов.")
+    arrows = []
+    if page:
+        arrows.append(btn("‹ Назад", "deadlines", page=page-1))
+    if more:
+        arrows.append(btn("Далее ›", "deadlines", page=page+1))
+    if arrows:
+        kb.row(*arrows)
+    kb.row(btn("➕ Добавить", "newdeadline"), btn("🏠 Меню", "root"))
+    return "\n".join(lines), kb.as_markup()
+
+
+async def show_deadlines(message: Message, db: Database, settings: Settings) -> None:
+    text, markup = await deadline_screen(db, settings)
+    await show_text(message, text, reply_markup=markup)
 
 
 @router.message(F.text == "📅 Дедлайны")
@@ -268,9 +286,10 @@ async def deadline_edit_date(message: Message, state: FSMContext, db: Database, 
         await show_text(message, f"Ошибка даты: {esc(exc)}. Пример: 25.11.2026 18:00")
         return
     data = await state.get_data()
-    await db.conn.execute("""UPDATE work_deadlines SET due_at=?,sent_day=0,sent_hour=0,sent_due=0,done=0
-                            WHERE id=?""", (when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), data["deadline_id"]))
-    await db.conn.commit()
+    if not await reschedule_deadline(db, data["deadline_id"], when):
+        await state.clear()
+        await show_text(message, "Дедлайн уже удалён.", reply_markup=MENU)
+        return
     await state.clear()
     await show_text(message, f"✅ Дедлайн перенесён на {when:%d.%m.%Y %H:%M}", reply_markup=MENU)
 
@@ -397,6 +416,21 @@ async def edit_value(message: Message, state: FSMContext, db: Database, settings
 async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
                            settings: Settings, state: FSMContext) -> None:
     a, id_, page, item_id = callback_data.action, callback_data.id, callback_data.page, callback_data.item
+    if a == "return":
+        context = await browse_context(db, cb.from_user.id)
+        if context and context["action"] == "search":
+            await state.clear()
+            await cb.answer()
+            return await send_search(cb.message, db, settings, context["query"])
+        if context:
+            target = WS(action=context["action"], id=context["section"], page=context["page"])
+        else:
+            row = await get_item(db, id_)
+            target = WS(action="section", id=row["section_id"]) if row and row["section_id"] else WS(action="sections")
+        return await workspace_button(cb, target, db, settings, state)
+    if a in {"star", "unstar"}:
+        await set_favorite(db, id_, a == "star")
+        return await workspace_button(cb, WS(action="card", id=id_), db, settings, state)
     if a == "timer":
         row = await db.get_timing(id_)
         if row is None:
@@ -414,14 +448,16 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
         if isinstance(cb.message, Message):
             await send_menu(cb.message)
         return
-    if a in {"section", "items", "active", "card", "deadlines"}:
+    if a in {"section", "items", "active", "card", "deadlines", "favorite", "today", "tomorrow", "soon"}:
         await state.clear()
-    if a in {"section", "items", "active"}:
+    if a in {"section", "items", "active", "favorite", "today", "tomorrow", "soon"}:
         section = await get_section(db, id_) if id_ else None
         if id_ and not section:
             return await cb.answer("Раздел больше не существует", show_alert=True)
+        await remember_browse(db, cb.from_user.id, a, id_, page)
         rows, more = await list_items(
-            db, section_id=id_ or None, page=page, active_only=(a == "active")
+            db, section_id=id_ or None, page=page, active_only=(a == "active"),
+            filter_name=a, today=datetime.now(settings.tz).date().isoformat(),
         )
         kb = InlineKeyboardBuilder()
         if section and section["parent_id"] is None:
@@ -443,7 +479,9 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
                        section["parent_id"] or 0))
         else:
             kb.row(btn("‹ Разделы", "sections"))
-        title = ("🟢 Действующие предложения" if a == "active" else
+        titles = {"favorite": "⭐ Избранное", "today": "📅 Сроки сегодня",
+                  "tomorrow": "📅 Сроки завтра", "soon": "📅 Сроки в ближайшие 3 дня"}
+        title = (titles[a] if a in titles else "🟢 Действующие предложения" if a == "active" else
                  f"📁 {esc(section['name'])}" if section else "📄 Последние записи")
         description = f"Страница {page + 1} · Выберите запись." if rows else "Записей пока нет."
         return await _show(cb, f"<b>{title}</b>\n\n{description}", kb.as_markup())
@@ -531,20 +569,8 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
         return await _show(cb, "✅ Дедлайн удалён.",
                            InlineKeyboardMarkup(inline_keyboard=[[btn("📅 К списку", "deadlines")]]))
     if a == "deadlines":
-        # Callback-friendly rendering using same logic as the message route.
-        rows = await list_deadlines(db)
-        kb = InlineKeyboardBuilder()
-        lines = ["<b>📅 Дедлайны</b>"]
-        for row in rows:
-            due = datetime.strptime(row["due_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            local = due.astimezone(settings.tz)
-            lines.append(f"• #{row['id']} {esc(_short(row['title'], 75))} — {local:%d.%m %H:%M}")
-            kb.row(btn(f"✅ #{row['id']}", "done", row["id"]),
-                   btn("✏️", "dedit", row["id"]), btn("🗑", "ddelask", row["id"]))
-        if not rows:
-            lines.append("Нет активных дедлайнов")
-        kb.row(btn("➕ Новый", "newdeadline"), btn("🏠 Меню", "root"))
-        return await _show(cb, "\n".join(lines), kb.as_markup())
+        text, markup = await deadline_screen(db, settings, page)
+        return await _show(cb, text, markup)
     await cb.answer("Неизвестная команда", show_alert=True)
 
 

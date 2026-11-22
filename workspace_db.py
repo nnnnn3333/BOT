@@ -45,6 +45,49 @@ CREATE TABLE IF NOT EXISTS work_deadlines (
 CREATE INDEX IF NOT EXISTS ix_work_deadlines_due ON work_deadlines(done, due_at);
 """
 
+async def set_favorite(db, item_id, favorite):
+    if await get_item(db, item_id) is None:
+        return False
+    if favorite:
+        await db.conn.execute("INSERT OR IGNORE INTO work_favorites VALUES (?)", (item_id,))
+    else:
+        await db.conn.execute("DELETE FROM work_favorites WHERE item_id=?", (item_id,))
+    await db.conn.commit()
+    return True
+
+
+async def remember_browse(db, chat, action, section=0, page=0, query=""):
+    await db.conn.execute(
+        """INSERT OR REPLACE INTO work_browse(chat,action,section,page,query)
+        VALUES (?,?,?,?,?)""", (chat, action, section, page, query),
+    )
+    await db.conn.commit()
+
+
+async def browse_context(db, chat):
+    async with db.conn.execute("SELECT * FROM work_browse WHERE chat=?", (chat,)) as cur:
+        return await cur.fetchone()
+
+
+async def reschedule_deadline(db, deadline_id, when):
+    async with db.conn.execute("SELECT item_id FROM work_deadlines WHERE id=?", (deadline_id,)) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return False
+    await db.conn.execute(
+        """UPDATE work_deadlines SET due_at=?,sent_day=0,sent_hour=0,sent_due=0,done=0 WHERE id=?""",
+        (when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), deadline_id),
+    )
+    if row["item_id"] is not None:
+        await db.conn.execute("INSERT OR IGNORE INTO work_item_meta(item_id) VALUES (?)", (row["item_id"],))
+        await db.conn.execute(
+            "UPDATE work_item_meta SET valid_until=? WHERE item_id=?",
+            (when.date().isoformat(), row["item_id"]),
+        )
+    await db.conn.commit()
+    return True
+
+
 DEFAULT_SECTIONS = {
     "Товары и цены": ("Смартфоны", "Аксессуары", "SIM-карты"),
     "Акции": ("Действующие", "Предстоящие", "Завершённые"),
@@ -56,6 +99,16 @@ DEFAULT_SECTIONS = {
 
 async def initialize(db: Database) -> None:
     await db.conn.executescript(SCHEMA)
+    await db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS work_favorites (
+            item_id INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS work_browse (
+            chat INTEGER PRIMARY KEY, action TEXT NOT NULL, section INTEGER NOT NULL,
+            page INTEGER NOT NULL, query TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS work_system (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+    """)
     # Совместимо с базами, которые уже получили раннюю версию расширения.
     async with db.conn.execute("PRAGMA table_info(work_item_meta)") as cur:
         columns = {row[1] for row in await cur.fetchall()}
@@ -111,7 +164,8 @@ async def get_item(db: Database, item_id: int):
         SELECT i.*, m.section_id, COALESCE(m.price,'') AS price,
                m.valid_until, COALESCE(m.details,'') AS details,
                COALESCE(s.name,'Без раздела') AS section_name,
-               s.parent_id AS section_parent_id
+               s.parent_id AS section_parent_id,
+               EXISTS(SELECT 1 FROM work_favorites f WHERE f.item_id=i.id) AS favorite
         FROM items i LEFT JOIN work_item_meta m ON m.item_id=i.id
         LEFT JOIN work_sections s ON s.id=m.section_id
         WHERE i.id=?
@@ -140,6 +194,7 @@ async def delete_item(db: Database, item_id: int) -> bool:
     if await db.get_item(item_id) is None:
         return False
     # Файл оставляем до ручной очистки: случайное нажатие не уничтожит оригинал скриншота.
+    await db.conn.execute("DELETE FROM work_favorites WHERE item_id=?", (item_id,))
     await db.conn.execute("DELETE FROM work_deadlines WHERE item_id=?", (item_id,))
     await db.conn.execute("DELETE FROM work_item_meta WHERE item_id=?", (item_id,))
     await db.conn.execute("DELETE FROM items WHERE id=?", (item_id,))
@@ -148,7 +203,7 @@ async def delete_item(db: Database, item_id: int) -> bool:
 
 
 async def list_items(db: Database, section_id: int | None = None, page: int = 0, limit: int = 8,
-                     active_only: bool = False):
+                     active_only: bool = False, filter_name: str = "", today: str | None = None):
     sql = """SELECT i.id,i.title,i.category,m.price,m.valid_until
         FROM items i LEFT JOIN work_item_meta m ON m.item_id=i.id
         WHERE 1=1"""
@@ -157,8 +212,19 @@ async def list_items(db: Database, section_id: int | None = None, page: int = 0,
         # При открытии корневого раздела также показываем карточки его подразделов.
         sql += " AND (m.section_id=? OR m.section_id IN (SELECT id FROM work_sections WHERE parent_id=?))"
         params.extend((section_id, section_id))
+    today = today or datetime.now(timezone.utc).date().isoformat()
     if active_only:
-        sql += " AND m.valid_until IS NOT NULL AND m.valid_until>=date('now')"
+        sql += " AND m.valid_until IS NOT NULL AND m.valid_until>=?"
+        params.append(today)
+    if filter_name == "favorite":
+        sql += " AND EXISTS(SELECT 1 FROM work_favorites f WHERE f.item_id=i.id)"
+    elif filter_name in ("today", "tomorrow", "soon"):
+        start = datetime.strptime(today, "%Y-%m-%d").date()
+        if filter_name == "tomorrow":
+            start += timedelta(days=1)
+        end = start + timedelta(days=2) if filter_name == "soon" else start
+        sql += " AND m.valid_until BETWEEN ? AND ?"
+        params.extend((start.isoformat(), end.isoformat()))
     sql += " ORDER BY i.id DESC LIMIT ? OFFSET ?"
     params.extend((limit + 1, max(0, page) * limit))
     async with db.conn.execute(sql, params) as cur:
@@ -178,7 +244,7 @@ async def search_items(db: Database, raw: str, limit: int = 15, active_only: boo
             for row in await db.search(fts, limit=60):
                 ids.append(row["id"])
         except sqlite3.Error:
-            log.warning("FTS query failed: %s", raw, exc_info=True)
+            log.warning("FTS query failed", exc_info=True)
     query = f"%{raw}%"
     sql = """SELECT i.id FROM items i
         LEFT JOIN work_item_meta m ON m.item_id=i.id
@@ -256,10 +322,10 @@ async def add_deadline(db: Database, title: str, when: datetime, item_id: int | 
     return int(identifier)
 
 
-async def list_deadlines(db: Database, include_done: bool = False, limit: int = 35):
+async def list_deadlines(db: Database, include_done: bool = False, limit: int = 35, page: int = 0, page_size: int | None = None):
     where = "" if include_done else "WHERE done=0"
     async with db.conn.execute(
-        f"SELECT * FROM work_deadlines {where} ORDER BY done,due_at LIMIT ?", (limit,)
+        f"SELECT * FROM work_deadlines {where} ORDER BY done,due_at LIMIT ? OFFSET ?", (limit, max(0, page) * (page_size or limit))
     ) as cur:
         return list(await cur.fetchall())
 

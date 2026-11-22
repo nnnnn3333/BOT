@@ -48,6 +48,8 @@ async def main() -> None:
         log.error("Ошибка конфигурации: %s", exc)
         sys.exit(1)
 
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    log.info("База данных: %s; файлы: %s", settings.db_path.resolve(), settings.storage_dir.resolve())
     settings.storage_dir.mkdir(parents=True, exist_ok=True)
     settings.tmp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -88,6 +90,8 @@ async def main() -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         scheduler.shutdown(wait=False)
+        from handlers.ingest import stop_background
+        await stop_background()
         await db.close()
         await bot.session.close()
         log.info("Бот остановлен")
