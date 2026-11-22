@@ -14,6 +14,7 @@ from config import ConfigError, load_settings
 from database import Database
 from handlers import get_routers
 from handlers.ui import NavigationMiddleware
+from handlers.navigation import ScreenNavigation, ScreenRequests
 from middlewares import AdminOnlyMiddleware
 from scheduler import setup_scheduler
 from workspace_db import initialize, notify_deadlines
@@ -53,13 +54,19 @@ async def main() -> None:
     db = Database(settings.db_path)
     await db.connect()
     await initialize(db)
+    await db.conn.execute(
+        "CREATE TABLE IF NOT EXISTS ui_messages(chat INTEGER, message INTEGER, PRIMARY KEY(chat, message))"
+    )
+    await db.conn.commit()
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(ScreenRequests(db))
     dp = Dispatcher()
     dp.message.outer_middleware(NavigationMiddleware())
 
     # Безопасность: на уровне Update, до любых хендлеров.
     dp.update.outer_middleware(AdminOnlyMiddleware(settings.admin_id))
+    dp.update.outer_middleware(ScreenNavigation(db))
 
     # Зависимости для хендлеров (подставляются по имени параметра).
     dp["db"] = db
