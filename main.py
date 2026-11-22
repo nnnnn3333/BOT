@@ -13,6 +13,7 @@ from aiogram.types import BotCommand
 from config import ConfigError, load_settings
 from database import Database
 from handlers import get_routers
+from handlers.ui import CommandCleanup
 from middlewares import AdminOnlyMiddleware
 from scheduler import setup_scheduler
 from workspace_db import initialize, notify_deadlines
@@ -55,6 +56,7 @@ async def main() -> None:
 
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.message.outer_middleware(CommandCleanup())
 
     # Безопасность: на уровне Update, до любых хендлеров.
     dp.update.outer_middleware(AdminOnlyMiddleware(settings.admin_id))

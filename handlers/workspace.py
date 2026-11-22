@@ -74,8 +74,9 @@ def card_keyboard(item_id: int, has_file: bool = False) -> InlineKeyboardMarkup:
         [btn("✏️ Редактировать", "edit", item_id), btn("📁 Переместить", "choose", item=item_id)],
         [btn("📅 Срок действия", "input", item_id, page=2), btn("💰 Цена", "input", item_id, page=1)],
     ]
+    from handlers.search import ItemCb
+    rows.append([InlineKeyboardButton(text="📄 Полный текст", callback_data=ItemCb(action="text", id=item_id).pack())])
     if has_file:
-        from handlers.search import ItemCb
         rows.append([InlineKeyboardButton(text="📎 Оригинал", callback_data=ItemCb(action="file", id=item_id).pack())])
     rows.append([btn("🗑 Удалить", "delask", item_id), btn("🏠 В меню", "root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -86,8 +87,8 @@ def _short(value: str, max_len: int = 65) -> str:
     return text if len(text) <= max_len else text[:max_len - 1] + "…"
 
 
-def card_text(row, settings: Settings) -> str:
-    lines = [f"<b>#{row['id']} · {esc(row['title'])}</b>", f"📁 {esc(row['section_name'])}\n"]
+def card_text(row, settings: Settings, content_limit: int = 900, compact: bool = False) -> str:
+    lines = [f"<b>#{row['id']} · {esc(_short(row['title'], 100) if compact else row['title'])}</b>", f"📁 {esc(row['section_name'])}\n"]
     if row["price"]:
         lines.append(f"💰 {esc(row['price'])}")
     if row["valid_until"]:
@@ -97,7 +98,7 @@ def card_text(row, settings: Settings) -> str:
     if row["details"]:
         lines.append(f"📋 {esc(_short(row['details'], 400))}")
     if row["content"]:
-        lines.append("\n<b>Содержимое:</b>\n" + esc(_short(row["content"], 900)))
+        lines.append("\n<b>Содержимое:</b>\n" + (esc(_short(row["content"], content_limit)) if content_limit else "Полный текст доступен по кнопке ниже."))
     else:
         lines.append("\nТекст не указан")
     return "\n".join(lines)
