@@ -138,10 +138,13 @@ async def cb_file(cb: CallbackQuery, callback_data: ItemCb, bot: Bot, db: Databa
     caption = f"<b>{esc(item['title'][:200])}</b>  <i>#{item['id']}</i>"
     upload = FSInputFile(path)
 
-    if item["category"] == "screen":
-        try:
-            await bot.send_photo(chat_id, upload, caption=caption)
-            return
-        except TelegramBadRequest:  # слишком большое/странное изображение — шлём как файл
-            upload = FSInputFile(path)
+    if item["category"] == "screen" and isinstance(cb.message, Message):
+        from workspace_db import get_item
+        from handlers.workspace import card_text, card_keyboard
+        from handlers.ui import show_card
+        row = await get_item(db, callback_data.id)
+        if row is not None:
+            await show_card(cb.message, row, settings, card_keyboard(row["id"], True),
+                            card_text(row, settings))
+        return
     await bot.send_document(chat_id, upload, caption=caption)

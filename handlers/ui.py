@@ -3,7 +3,7 @@ import asyncio
 from collections import defaultdict
 from pathlib import Path
 from aiogram import BaseMiddleware
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, InputMediaPhoto, Message, ReplyKeyboardMarkup
 from utils import resolve_storage_path
 
@@ -24,7 +24,7 @@ def _previous(message):
     if message.from_user and message.from_user.is_bot:
         if message.photo or message.document:
             _media.add((message.chat.id, message.message_id))
-        return message.message_id
+        return _screens.get(message.chat.id, message.message_id)
     return _screens.get(message.chat.id)
 
 
@@ -66,7 +66,7 @@ async def _render(message, text, markup, photo=None):
 
 async def show_text(message: Message, text: str, **kwargs):
     # Reply keyboards need a separate text message to restore the bottom menu.
-    if isinstance(kwargs.get("reply_markup"), ReplyKeyboardMarkup):
+    if isinstance(kwargs.get("reply_markup"), ReplyKeyboardMarkup) and not _previous(message):
         async with _locks[message.chat.id]:
             previous = _previous(message)
             if previous:
@@ -74,7 +74,10 @@ async def show_text(message: Message, text: str, **kwargs):
             sent = await message.answer(text, **kwargs)
             _screens[message.chat.id] = sent.message_id
             return sent
-    return await _render(message, text, kwargs.get("reply_markup"))
+    markup = kwargs.get("reply_markup")
+    if isinstance(markup, ReplyKeyboardMarkup):
+        markup = None
+    return await _render(message, text, markup)
 
 
 async def show_card(message, row, settings, markup, text):
@@ -96,9 +99,8 @@ async def show_card(message, row, settings, markup, text):
     return await _render(message, text, markup, photo)
 
 
-class CommandCleanup(BaseMiddleware):
+class NavigationMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        result = await handler(event, data)
         commands = {
             "/start", "/menu", "/cancel", "/sections", "/find", "/deadline",
             "/deadlines", "/timer", "/stats", "/backup", "/help", "/reindex",
@@ -110,8 +112,7 @@ class CommandCleanup(BaseMiddleware):
         text = (event.text or "").strip()
         command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
         if text in labels or command in commands:
-            try:
-                await event.delete()
-            except (TelegramBadRequest, TelegramForbiddenError):
-                pass
-        return result
+            state = data.get("state")
+            if state is not None:
+                await state.clear()
+        return await handler(event, data)
