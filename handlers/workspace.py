@@ -30,7 +30,8 @@ MENU = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🔎 Поиск"), KeyboardButton(text="🗂 База знаний")],
     [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📅 Дедлайны")],
     [KeyboardButton(text="⏱ Таймеры"), KeyboardButton(text="📊 Отчёт")],
-], resize_keyboard=True, input_field_placeholder="Перешли скрин, документ или заметку")
+    [KeyboardButton(text="🗄 Резервная копия"), KeyboardButton(text="❓ Помощь")],
+], resize_keyboard=True, is_persistent=True, one_time_keyboard=False, input_field_placeholder="Перешли скрин, документ или заметку")
 
 
 class SearchInput(StatesGroup):
@@ -74,10 +75,6 @@ def card_keyboard(item_id: int, has_file: bool = False) -> InlineKeyboardMarkup:
         [btn("✏️ Редактировать", "edit", item_id), btn("📁 Переместить", "choose", item=item_id)],
         [btn("📅 Срок действия", "input", item_id, page=2), btn("💰 Цена", "input", item_id, page=1)],
     ]
-    from handlers.search import ItemCb
-    rows.append([InlineKeyboardButton(text="📄 Полный текст", callback_data=ItemCb(action="text", id=item_id).pack())])
-    if has_file:
-        rows.append([InlineKeyboardButton(text="📎 Оригинал", callback_data=ItemCb(action="file", id=item_id).pack())])
     rows.append([btn("🗑 Удалить", "delask", item_id), btn("🏠 В меню", "root")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -98,7 +95,7 @@ def card_text(row, settings: Settings, content_limit: int = 900, compact: bool =
     if row["details"]:
         lines.append(f"📋 {esc(_short(row['details'], 400))}")
     if row["content"]:
-        lines.append("\n<b>Содержимое:</b>\n" + (esc(_short(row["content"], content_limit)) if content_limit else "Полный текст доступен по кнопке ниже."))
+        lines.append("\n<b>Содержимое:</b>\n" + (esc(_short(row["content"], content_limit)) if content_limit else "Текст записи сокращён для подписи к фото."))
     else:
         lines.append("\nТекст не указан")
     return "\n".join(lines)
@@ -125,6 +122,23 @@ async def send_menu(message: Message) -> None:
 @router.message(F.text == "🏠 Меню")
 async def cmd_menu(message: Message) -> None:
     await send_menu(message)
+
+
+@router.message(F.text == "🗄 Резервная копия")
+async def backup_button(message: Message, bot: Bot, db: Database, settings: Settings) -> None:
+    from handlers.common import cmd_backup
+    await cmd_backup(message, bot, db, settings)
+
+
+@router.message(F.text == "❓ Помощь")
+async def help_button(message: Message) -> None:
+    await show_text(
+        message,
+        "<b>❓ Помощь</b>\n\n"
+        "Выбирайте действия в нижнем меню.\n"
+        "Чтобы сохранить заметку, фото или документ, отправьте их в чат.\n"
+        "При вводе данных нижнее меню заменяется кнопками отмены и возврата.",
+    )
 
 
 @router.message(Command("cancel"))

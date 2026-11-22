@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from aiogram import BaseMiddleware
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
 log = logging.getLogger(__name__)
 _current = ContextVar("workbot_screen", default=None)
+_keyboards = {}
 
 
 @dataclass
@@ -25,6 +26,11 @@ class ScreenRequests(BaseRequestMiddleware):
 
     async def __call__(self, make_request, bot, method):
         result = await make_request(bot, method)
+        markup = getattr(method, "reply_markup", None)
+        screen = _current.get()
+        if screen and isinstance(markup, ReplyKeyboardMarkup):
+            labels = [button.text for row in markup.keyboard for button in row]
+            _keyboards[screen.chat] = "input" if labels == ["❌ Отмена", "🏠 Меню"] else "menu"
         screen = _current.get()
         if screen is None:
             return result
@@ -69,6 +75,20 @@ class ScreenNavigation(BaseMiddleware):
                     await self.db.conn.commit()
                 result = await handler(event, data)
                 if screen.messages:
+                    state = data.get("state")
+                    mode = "input" if state and await state.get_state() else "menu"
+                    if _keyboards.get(screen.chat) != mode:
+                        from handlers.workspace import MENU
+                        keyboard = MENU
+                        prompt = "Выберите действие в нижнем меню."
+                        if mode == "input":
+                            keyboard = ReplyKeyboardMarkup(
+                                keyboard=[[KeyboardButton(text="❌ Отмена"), KeyboardButton(text="🏠 Меню")]],
+                                resize_keyboard=True, is_persistent=True, one_time_keyboard=False,
+                            )
+                            prompt = "Введите ответ. Для выхода доступны кнопки внизу."
+                        await data["bot"].send_message(screen.chat, prompt, reply_markup=keyboard)
+                        _keyboards[screen.chat] = mode
                     await self.clean(data["bot"], screen)
                     if incoming:
                         # Uploaded originals have already been stored by the handler.

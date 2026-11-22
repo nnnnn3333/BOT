@@ -108,6 +108,7 @@ class NavigationMiddleware(BaseMiddleware):
         labels = {
             "🔎 Поиск", "🗂 База знаний", "➕ Добавить", "📅 Дедлайны",
             "⏱ Таймеры", "📊 Отчёт", "🏠 Меню", "❌ Отмена",
+            "🗄 Резервная копия", "❓ Помощь",
         }
         text = (event.text or "").strip()
         command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
