@@ -18,6 +18,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Settings
 from database import Database
 from utils import esc
+from handlers.ui import show_text, show_card
 from workspace_db import (add_deadline, create_section, delete_item, get_item, get_section,
                           list_deadlines, list_items, list_sections, parse_datetime,
                           remove_deadline, search_items, set_deadline_done, update_item,
@@ -86,7 +87,7 @@ def _short(value: str, max_len: int = 65) -> str:
 
 
 def card_text(row, settings: Settings) -> str:
-    lines = [f"<b>#{row['id']} · {esc(row['title'])}</b>", f"📁 {esc(row['section_name'])}"]
+    lines = [f"<b>#{row['id']} · {esc(row['title'])}</b>", f"📁 {esc(row['section_name'])}\n"]
     if row["price"]:
         lines.append(f"💰 {esc(row['price'])}")
     if row["valid_until"]:
@@ -103,17 +104,13 @@ def card_text(row, settings: Settings) -> str:
 
 
 async def _show(cb: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
-    if isinstance(cb.message, Message):
-        try:
-            await cb.message.edit_text(text[:4000], reply_markup=markup)
-        except TelegramBadRequest as exc:
-            if "message is not modified" not in str(exc).lower():
-                await cb.message.answer(text[:4000], reply_markup=markup)
     await cb.answer()
+    if isinstance(cb.message, Message):
+        await show_text(cb.message, text, reply_markup=markup)
 
 
 async def send_menu(message: Message) -> None:
-    await message.answer(
+    await show_text(message,
         "<b>Workbot · рабочая база</b>\n\n"
         "Перешли сюда скриншот, текст или документ — он сохранится и будет доступен через поиск. "
         "После сохранения выбери раздел и при необходимости укажи цену или срок действия.\n\n"
@@ -133,7 +130,7 @@ async def cmd_menu(message: Message) -> None:
 @router.message(F.text == "❌ Отмена")
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Действие отменено.", reply_markup=MENU)
+    await show_text(message, "Действие отменено.", reply_markup=MENU)
 
 
 async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
@@ -142,19 +139,19 @@ async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
         kb.row(btn(f"📁 {section['name']}", "section", section["id"]))
     kb.row(btn("🕓 Последние записи", "items"), btn("🟢 Сроки действуют", "active"))
     kb.row(btn("➕ Новый раздел", "newsec"))
-    return "<b>🗂 База знаний</b>\nВыбери раздел или открой последние записи.", kb.as_markup()
+    return "<b>🗂 База знаний</b>\n\nВыбери раздел или открой последние записи.", kb.as_markup()
 
 
 @router.message(F.text == "🗂 База знаний")
 @router.message(Command("sections"))
 async def cmd_sections(message: Message, db: Database) -> None:
     text, markup = await browse_roots(db)
-    await message.answer(text, reply_markup=markup)
+    await show_text(message, text, reply_markup=markup)
 
 
 @router.message(F.text == "➕ Добавить")
 async def cmd_add(message: Message) -> None:
-    await message.answer(
+    await show_text(message,
         "<b>Новая запись</b>\n\nПерешли сообщение, скриншот или файл в этот чат. "
         "Бот сохранит оригинал, извлечёт текст (если возможно) и покажет кнопки для заполнения карточки.\n\n"
         "Если отправляешь несколько скринов, каждый сохранится отдельно."
@@ -164,18 +161,18 @@ async def cmd_add(message: Message) -> None:
 @router.message(F.text == "🔎 Поиск")
 async def ask_search(message: Message, state: FSMContext) -> None:
     await state.set_state(SearchInput.query)
-    await message.answer("Введи товар, цену, название акции, условие или дату (например, 2026-12-01).\n/cancel — отмена.")
+    await show_text(message, "Введи товар, цену, название акции, условие или дату (например, 2026-12-01).\n/cancel — отмена.")
 
 
 async def send_search(message: Message, db: Database, settings: Settings, query: str) -> None:
     results = await search_items(db, query)
     if not results:
-        await message.answer(f"По запросу «{esc(query)}» ничего не нашлось.")
+        await show_text(message, f"По запросу «{esc(query)}» ничего не нашлось.")
         return
     kb = InlineKeyboardBuilder()
     for row in results:
         kb.row(btn(f"📄 {_short(row['title'], 40)} · #{row['id']}", "card", row["id"]))
-    await message.answer(f"🔎 <b>Поиск: {esc(query)}</b>\nНайдено: {len(results)}\n\n" +
+    await show_text(message, f"🔎 <b>Поиск: {esc(query)}</b>\nНайдено: {len(results)}\n\n" +
                          "\n".join(f"• #{row['id']} {esc(_short(row['title'], 78))}" for row in results),
                          reply_markup=kb.as_markup())
 
@@ -194,7 +191,7 @@ async def find_command(message: Message, command: CommandObject, db: Database,
 async def find_text(message: Message, state: FSMContext, db: Database, settings: Settings) -> None:
     await state.clear()
     if not message.text:
-        await message.answer("Пришли текст для поиска.")
+        await show_text(message, "Пришли текст для поиска.")
         return
     await send_search(message, db, settings, message.text.strip()[:150])
 
@@ -220,7 +217,7 @@ async def show_deadlines(message: Message, db: Database, settings: Settings) -> 
     if not rows:
         text_lines.append("Пока нет активных дедлайнов.")
     kb.row(btn("➕ Добавить дедлайн", "newdeadline"), btn("🏠 Назад", "root"))
-    await message.answer("\n".join(text_lines)[:4000], reply_markup=kb.as_markup())
+    await show_text(message, "\n".join(text_lines)[:4000], reply_markup=kb.as_markup())
 
 
 @router.message(F.text == "📅 Дедлайны")
@@ -232,18 +229,18 @@ async def deadlines_command(message: Message, db: Database, settings: Settings) 
 @router.message(Command("deadline"))
 async def new_deadline_command(message: Message, state: FSMContext) -> None:
     await state.set_state(DeadlineInput.title)
-    await message.answer("Как называется задача?\nНапример: Отправить отчёт по продажам. /cancel — отмена.")
+    await show_text(message, "Как называется задача?\nНапример: Отправить отчёт по продажам. /cancel — отмена.")
 
 
 @router.message(DeadlineInput.title)
 async def deadline_title(message: Message, state: FSMContext) -> None:
     title = (message.text or "").strip()[:200]
     if not title:
-        await message.answer("Введи название текстом")
+        await show_text(message, "Введи название текстом")
         return
     await state.update_data(title=title)
     await state.set_state(DeadlineInput.date)
-    await message.answer("Укажи срок: <code>25.11.2026 18:00</code>\nЕсли время не указано, будет 12:00. /cancel — отмена.")
+    await show_text(message, "Укажи срок: 25.11.2026 18:00\nЕсли время не указано, будет 12:00. /cancel — отмена.")
 
 
 @router.message(DeadlineEditInput.date)
@@ -253,14 +250,14 @@ async def deadline_edit_date(message: Message, state: FSMContext, db: Database, 
         if when.astimezone(timezone.utc) <= datetime.now(timezone.utc):
             raise ValueError("Укажите будущее время")
     except ValueError as exc:
-        await message.answer(f"Ошибка даты: {esc(exc)}. Пример: 25.11.2026 18:00")
+        await show_text(message, f"Ошибка даты: {esc(exc)}. Пример: 25.11.2026 18:00")
         return
     data = await state.get_data()
     await db.conn.execute("""UPDATE work_deadlines SET due_at=?,sent_day=0,sent_hour=0,sent_due=0,done=0
                             WHERE id=?""", (when.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), data["deadline_id"]))
     await db.conn.commit()
     await state.clear()
-    await message.answer(f"✅ Дедлайн перенесён на {when:%d.%m.%Y %H:%M}", reply_markup=MENU)
+    await show_text(message, f"✅ Дедлайн перенесён на {when:%d.%m.%Y %H:%M}", reply_markup=MENU)
 
 
 @router.message(DeadlineInput.date)
@@ -270,12 +267,12 @@ async def deadline_date(message: Message, state: FSMContext, db: Database, setti
         if when.astimezone(timezone.utc) <= datetime.now(timezone.utc):
             raise ValueError("Время уже прошло")
     except ValueError as exc:
-        await message.answer(f"Ошибка даты: {esc(exc)}. Пример: <code>25.11.2026 18:00</code>")
+        await show_text(message, f"Ошибка даты: {esc(exc)}. Пример: 25.11.2026 18:00")
         return
     data = await state.get_data()
     await add_deadline(db, data["title"], when)
     await state.clear()
-    await message.answer(f"✅ Дедлайн создан: {esc(data['title'])}\n{when:%d.%m.%Y %H:%M}", reply_markup=MENU)
+    await show_text(message, f"✅ Дедлайн создан: {esc(data['title'])}\n{when:%d.%m.%Y %H:%M}", reply_markup=MENU)
 
 
 @router.message(F.text == "⏱ Таймеры")
@@ -284,25 +281,24 @@ async def cmd_timer_menu(message: Message, db: Database, state: FSMContext) -> N
         "SELECT id,task_name,status FROM timings WHERE status IN ('new','running','paused') ORDER BY id DESC LIMIT 6"
     ) as cur:
         rows = list(await cur.fetchall())
-    if rows:
-        from handlers.timers import render_timer, timer_keyboard
-        for record in rows:
-            row = await db.get_timing(record["id"])
-            await message.answer(render_timer(row), reply_markup=timer_keyboard(row["id"]))
+    kb = InlineKeyboardBuilder()
+    for record in rows:
+        kb.row(btn(f"⏱ {_short(record['task_name'], 45)}", "timer", record["id"]))
     await state.set_state(TimerInput.name)
-    await message.answer("Чтобы создать новый таймер, введи название задачи. /cancel — отмена.")
+    await show_text(message, "<b>⏱ Таймеры</b>\n\nВыберите таймер или введите название новой задачи.",
+                    reply_markup=kb.as_markup())
 
 
 @router.message(TimerInput.name)
 async def timer_name(message: Message, db: Database, state: FSMContext) -> None:
     name = (message.text or "").strip()[:200]
     if not name:
-        await message.answer("Нужно название задачи.")
+        await show_text(message, "Нужно название задачи.")
         return
     from handlers.timers import render_timer, timer_keyboard
     timer_id = await db.create_timing(name)
     await state.clear()
-    await message.answer(render_timer(await db.get_timing(timer_id)), reply_markup=timer_keyboard(timer_id))
+    await show_text(message, render_timer(await db.get_timing(timer_id)), reply_markup=timer_keyboard(timer_id))
 
 
 @router.message(F.text == "📊 Отчёт")
@@ -315,16 +311,16 @@ async def stats_menu(message: Message, db: Database, settings: Settings) -> None
 async def section_name(message: Message, state: FSMContext, db: Database) -> None:
     name = (message.text or "").strip()
     if not name:
-        await message.answer("Раздел должен иметь название.")
+        await show_text(message, "Раздел должен иметь название.")
         return
     data = await state.get_data()
     try:
         section_id = await create_section(db, name, data.get("parent_id"))
     except ValueError as exc:
-        await message.answer(esc(exc))
+        await show_text(message, esc(exc))
         return
     await state.clear()
-    await message.answer(f"✅ Раздел создан: {esc(name)} (#{section_id})", reply_markup=MENU)
+    await show_text(message, f"✅ Раздел создан: {esc(name)} (#{section_id})", reply_markup=MENU)
 
 
 EDIT_FIELDS = {1: ("price", "цену, например 19 990 ₽"),
@@ -342,7 +338,7 @@ async def edit_value(message: Message, state: FSMContext, db: Database, settings
     item_id = data.get("item_id")
     if field not in {entry[0] for entry in EDIT_FIELDS.values()} or not item_id:
         await state.clear()
-        await message.answer("Действие истекло, открой карточку ещё раз.")
+        await show_text(message, "Действие истекло, открой карточку ещё раз.")
         return
     raw = (message.text or "").strip()
     if field == "valid_until":
@@ -352,12 +348,12 @@ async def edit_value(message: Message, state: FSMContext, db: Database, settings
             try:
                 value = parse_datetime(raw, settings.tz, end_of_day=True).date().isoformat()
             except ValueError as exc:
-                await message.answer("Не понял дату: " + esc(exc) + ". Например, 25.11.2026")
+                await show_text(message, "Не понял дату: " + esc(exc) + ". Например, 25.11.2026")
                 return
     elif field == "title":
         value = raw[:150]
         if not value:
-            await message.answer("Название не может быть пустым")
+            await show_text(message, "Название не может быть пустым")
             return
     elif field == "content":
         value = raw[:100_000]
@@ -378,51 +374,64 @@ async def edit_value(message: Message, state: FSMContext, db: Database, settings
             await db.conn.commit()
     await state.clear()
     item = await get_item(db, item_id)
-    await message.answer("✅ Карточка обновлена.\n\n" + card_text(item, settings),
-                         reply_markup=card_keyboard(item_id, bool(item["file_path"])))
+    await show_card(message, item, settings, card_keyboard(item_id, bool(item["file_path"])),
+                    card_text(item, settings))
 
 
 @router.callback_query(WS.filter())
 async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
                            settings: Settings, state: FSMContext) -> None:
     a, id_, page, item_id = callback_data.action, callback_data.id, callback_data.page, callback_data.item
+    if a == "timer":
+        row = await db.get_timing(id_)
+        if row is None:
+            return await cb.answer("Таймер не найден", show_alert=True)
+        await state.clear()
+        from handlers.timers import render_timer, timer_keyboard
+        return await _show(cb, render_timer(row), timer_keyboard(id_))
     if a == "root":
         title, kb = await browse_roots(db)
         return await _show(cb, title, kb)
-    if a == "section":
-        section = await get_section(db, id_)
-        if not section:
+    if a in {"section", "items", "active"}:
+        section = await get_section(db, id_) if id_ else None
+        if id_ and not section:
             return await cb.answer("Раздел больше не существует", show_alert=True)
+        rows, more = await list_items(
+            db, section_id=id_ or None, page=page, active_only=(a == "active")
+        )
         kb = InlineKeyboardBuilder()
-        if section["parent_id"] is None:
+        if section and section["parent_id"] is None:
             for child in await list_sections(db, id_):
                 kb.row(btn(f"📂 {child['name']}", "section", child["id"]))
-            kb.row(btn("➕ Подраздел", "newsec", id_))
-        kb.row(btn("📄 Показать записи", "items", id_))
-        kb.row(btn("↩️ Назад", "root" if section["parent_id"] is None else "section", section["parent_id"] or 0))
-        return await _show(cb, f"<b>📁 {esc(section['name'])}</b>\nВыбери подраздел или записи.", kb.as_markup())
-    if a in {"items", "active"}:
-        root = None if id_ == 0 else id_
-        rows, more = await list_items(db, section_id=root, page=page, active_only=(a == "active"))
-        kb = InlineKeyboardBuilder()
         for row in rows:
-            kb.row(btn(f"#{row['id']} · {_short(row['title'], 40)}", "card", row["id"]))
+            kb.row(btn(f"📄 {_short(row['title'], 45)}", "card", row["id"]))
         arrows = []
         if page > 0:
-            arrows.append(btn("⬅️ Назад", a, id_, page - 1))
+            arrows.append(btn("‹ Назад", a, id_, page - 1))
         if more:
-            arrows.append(btn("Далее ➡️", a, id_, page + 1))
+            arrows.append(btn("Далее ›", a, id_, page + 1))
         if arrows:
             kb.row(*arrows)
-        kb.row(btn("🏠 Разделы", "root"))
-        title = "🟢 Действующие предложения" if a == "active" else "📄 Записи"
-        return await _show(cb, f"<b>{title} · страница {page+1}</b>\n" +
-                           ("Выбери карточку." if rows else "Записей пока нет."), kb.as_markup())
+        if section:
+            if section["parent_id"] is None:
+                kb.row(btn("➕ Подраздел", "newsec", id_))
+            kb.row(btn("‹ Разделы", "root" if section["parent_id"] is None else "section",
+                       section["parent_id"] or 0))
+        else:
+            kb.row(btn("‹ Разделы", "root"))
+        title = ("🟢 Действующие предложения" if a == "active" else
+                 f"📁 {esc(section['name'])}" if section else "📄 Последние записи")
+        description = f"Страница {page + 1} · Выберите запись." if rows else "Записей пока нет."
+        return await _show(cb, f"<b>{title}</b>\n\n{description}", kb.as_markup())
     if a == "card":
         row = await get_item(db, id_)
         if not row:
             return await cb.answer("Запись удалена", show_alert=True)
-        return await _show(cb, card_text(row, settings), card_keyboard(id_, bool(row["file_path"])))
+        await cb.answer()
+        if isinstance(cb.message, Message):
+            return await show_card(cb.message, row, settings,
+                                   card_keyboard(id_, bool(row["file_path"])), card_text(row, settings))
+        return
     if a == "edit":
         if not await get_item(db, id_):
             return await cb.answer("Запись удалена", show_alert=True)
@@ -438,7 +447,7 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
         await state.set_state(EditInput.value)
         await state.update_data(item_id=id_, field=field)
         await cb.answer()
-        await cb.message.answer(f"Введи {prompt}.\nЧтобы удалить срок, напиши <code>нет</code>. /cancel — отмена.")
+        await show_text(cb.message, f"Введи {prompt}.\nЧтобы удалить срок, напиши нет. /cancel — отмена.")
         return
     if a == "choose":
         if not await get_item(db, item_id):
@@ -457,13 +466,14 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
     if a == "setsection":
         await update_item(db, item_id, "section_id", id_)
         row = await get_item(db, item_id)
-        return await _show(cb, "✅ Раздел изменён\n\n" + card_text(row, settings),
-                           card_keyboard(item_id, bool(row["file_path"])))
+        await cb.answer()
+        return await show_card(cb.message, row, settings, card_keyboard(item_id, bool(row["file_path"])),
+                               card_text(row, settings))
     if a == "newsec":
         await state.set_state(SectionInput.name)
         await state.update_data(parent_id=id_ or None)
         await cb.answer()
-        await cb.message.answer("Введи название нового раздела / подраздела. /cancel — отмена.")
+        await show_text(cb.message, "Введи название нового раздела / подраздела. /cancel — отмена.")
         return
     if a == "delask":
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -477,13 +487,13 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
     if a == "newdeadline":
         await state.set_state(DeadlineInput.title)
         await cb.answer()
-        await cb.message.answer("Как называется задача? /cancel — отмена.")
+        await show_text(cb.message, "Как называется задача? /cancel — отмена.")
         return
     if a == "dedit":
         await state.set_state(DeadlineEditInput.date)
         await state.update_data(deadline_id=id_)
         await cb.answer()
-        await cb.message.answer("Укажи новую дату дедлайна: 25.11.2026 18:00. /cancel — отмена.")
+        await show_text(cb.message, "Укажи новую дату дедлайна: 25.11.2026 18:00. /cancel — отмена.")
         return
     if a == "done":
         await set_deadline_done(db, id_, True)
@@ -519,9 +529,9 @@ async def reindex_old_screens(message: Message, db: Database, settings: Settings
     """Переиндексировать до 50 старых скринов; исходные файлы не изменяются."""
     pending = await pending_screens(db, limit=50)
     if not pending:
-        await message.answer("Все скриншоты уже обработаны OCR или скриншотов нет.")
+        await show_text(message, "Все скриншоты уже обработаны OCR или скриншотов нет.")
         return
-    await message.answer(f"Распознаю до {len(pending)} старых скриншотов. Текст добавится в поиск.")
+    await show_text(message, f"Распознаю до {len(pending)} старых скриншотов. Текст добавится в поиск.")
     good, failed = 0, 0
     root = settings.storage_dir.resolve()
     for row in pending:
@@ -540,4 +550,4 @@ async def reindex_old_screens(message: Message, db: Database, settings: Settings
             failed += 1
         if not hint.startswith("OCR не запущен"):
             await mark_ocr_processed(db, row["id"])
-    await message.answer(f"Готово: распознано {good}, без текста/файла {failed}. Повтори /reindex для следующей порции.")
+    await show_text(message, f"Готово: распознано {good}, без текста/файла {failed}. Повтори /reindex для следующей порции.")

@@ -15,6 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Settings
 from database import Database
 from reports import build_weekly_report, total_duration_label
+from handlers.ui import show_text
 from utils import esc, fmt_duration
 
 router = Router(name="timers")
@@ -45,12 +46,12 @@ def timer_keyboard(timing_id: int) -> InlineKeyboardMarkup:
 def render_timer(row: sqlite3.Row) -> str:
     label = "Итого" if row["status"] == "stopped" else "Затрачено"
     text = (
-        f"⏱ <b>{esc(row['task_name'])}</b>\n"
+        f"<b>⏱ {esc(row['task_name'])}</b>\n\n"
         f"Статус: {STATUS_LABELS[row['status']]}\n"
-        f"{label}: <b>{fmt_duration(row['elapsed_sec'])}</b>"
+        f"{label}: {fmt_duration(row['elapsed_sec'])}"
     )
     if row["status"] == "running":
-        text += "\n<i>Время на момент обновления; «Старт» обновит его ещё раз.</i>"
+        text += "\nВремя на момент обновления; «Старт» обновит его ещё раз."
     return text
 
 
@@ -58,12 +59,12 @@ def render_timer(row: sqlite3.Row) -> str:
 async def cmd_timer(message: Message, command: CommandObject, db: Database) -> None:
     name = " ".join((command.args or "").split())
     if not name:
-        await message.answer("Использование: /timer <code>название задачи</code>")
+        await show_text(message, "Использование: /timer <code>название задачи</code>")
         return
 
     timing_id = await db.create_timing(name[:200])
     row = await db.get_timing(timing_id)
-    await message.answer(render_timer(row), reply_markup=timer_keyboard(timing_id))
+    await show_text(message, render_timer(row), reply_markup=timer_keyboard(timing_id))
 
 
 @router.callback_query(TimerCb.filter())
@@ -104,7 +105,7 @@ async def on_timer_button(cb: CallbackQuery, callback_data: TimerCb, db: Databas
 async def cmd_stats(message: Message, db: Database, settings: Settings) -> None:
     rows = await db.timings_since(days=REPORT_DAYS)
     if not rows:
-        await message.answer(f"За последние {REPORT_DAYS} дней таймингов нет.")
+        await show_text(message, f"За последние {REPORT_DAYS} дней таймингов нет.")
         return
 
     data = await asyncio.to_thread(build_weekly_report, rows, settings.tz)

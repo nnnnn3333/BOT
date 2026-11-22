@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from backup import send_backup
+from handlers.ui import show_text
 from config import Settings
 from database import Database
 
@@ -29,10 +30,10 @@ HELP_TEXT = (
 
 @router.message(Command("start", "help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT)
+    await show_text(message, HELP_TEXT)
 
 
 @router.message(Command("backup"))
 async def cmd_backup(message: Message, bot: Bot, db: Database, settings: Settings) -> None:
-    await message.answer("⏳ Собираю бэкап…")
+    await show_text(message, "⏳ Собираю бэкап…")
     await send_backup(bot, db, settings)
