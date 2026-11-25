@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.types import Message, Chat, User, Update, CallbackQuery, PhotoSize, InlineKeyboardMarkup
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from database import Database
 from workspace_db import initialize, create_section, get_item, get_section, update_item
 from handlers import get_routers
@@ -18,6 +18,8 @@ from middlewares import AdminOnlyMiddleware
 class FakeSession(BaseSession):
     def __init__(self):
         super().__init__(); self.messages = {}; self.deleted = []; self.next_id = 1000; self.calls = []; self.no_change = False
+        self.fail_delete_once = False
+        self.fail_edit_once = False
     async def close(self): pass
     async def stream_content(self, *args, **kwargs):
         yield b''
@@ -26,8 +28,14 @@ class FakeSession(BaseSession):
         self.calls.append(method)
         if name == 'answerCallbackQuery': return True
         if name == 'deleteMessage':
+            if self.fail_delete_once:
+                self.fail_delete_once = False
+                raise TelegramNetworkError(method=method,message='Temporary connection error')
             self.deleted.append(method.message_id); self.messages.pop(method.message_id,None); return True
         if name.startswith('edit'):
+            if self.fail_edit_once:
+                self.fail_edit_once = False
+                raise TelegramNetworkError(method=method,message='Temporary rendering error')
             if self.no_change and name in {'editMessageText', 'editMessageMedia', 'editMessageCaption'}:
                 self.no_change = False
                 raise TelegramBadRequest(method=method,message='message is not modified')
@@ -57,10 +65,13 @@ class Navigation(unittest.IsolatedAsyncioTestCase):
             dp.message.outer_middleware(NavigationMiddleware()); dp.update.outer_middleware(AdminOnlyMiddleware(5)); dp.update.outer_middleware(ScreenNavigation(db))
             for router in get_routers(): dp.include_router(router)
             user = User(id=5,is_bot=False,first_name='Test'); number = 0
-            async def send(text):
+            async def send(text, *, visible=False):
                 nonlocal number
                 number += 1
-                await dp.feed_update(bot,Update(update_id=number,message=Message(message_id=number,date=1,chat=Chat(id=5,type='private'),from_user=user,text=text)))
+                message = Message(message_id=number,date=1,chat=Chat(id=5,type='private'),from_user=user,text=text)
+                if visible:
+                    session.messages[number] = message
+                await dp.feed_update(bot,Update(update_id=number,message=message))
             async def click(data, actor=None):
                 nonlocal number
                 number += 1
@@ -96,6 +107,31 @@ class Navigation(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(number, session.deleted)
                 self.assertEqual(_anchors[5], anchor)
                 self.assertFalse(any(m.text == 'Меню' for m in session.messages.values()))
+                session.fail_delete_once = True
+                await send('📅\ufe0f Дедлайны')
+                self.assertIn(number, session.deleted)
+                self.assertTrue(any('Дедлайны' in (m.caption or m.text or '') for m in session.messages.values()))
+                session.fail_edit_once = True
+                with self.assertRaises(TelegramNetworkError):
+                    await send('🗂\ufe0f База знаний')
+                self.assertIn(number, session.deleted)
+                await send('🗂 База знаний')
+                self.assertIn(number, session.deleted)
+
+
+                timing_id = await db.create_timing("Рабочая задача")
+                await db.start_timing(timing_id)
+                await db.stop_timing(timing_id)
+                for _ in range(2):
+                    await send('📊 Отчёт', visible=True)
+                    self.assertNotIn(number, session.messages)
+                    reports = [m for m in session.messages.values() if 'Тайминги за' in (m.caption or '')]
+                    self.assertEqual(len(reports), 1)
+                    self.assertEqual(set(session.messages), {_anchors[5], reports[0].message_id})
+                await send('🗂 База знаний', visible=True)
+                self.assertNotIn(number, session.messages)
+                self.assertFalse(any('Тайминги за' in (m.caption or '') for m in session.messages.values()))
+                self.assertLessEqual(len(session.messages), 2)
 
                 parent = await create_section(db, 'Проверка корня')
                 child = await create_section(db, 'Проверка вложения', parent)
@@ -139,9 +175,10 @@ class Navigation(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('📄 Long',str(screen().reply_markup))
                 self.assertIsNone((await get_item(db,photo))['section_id'])
 
+                documents_before = sum(call.__api_method__ == 'sendDocument' for call in session.calls)
                 await send('🗄 Резервная копия')
                 self.assertEqual(len(list(settings.backup_dir.glob('*.zip'))),1)
-                self.assertFalse(any(call.__api_method__=='sendDocument' for call in session.calls))
+                self.assertEqual(sum(call.__api_method__ == 'sendDocument' for call in session.calls), documents_before)
                 self.assertFalse(any(m.text=='Меню' for m in session.messages.values()))
 
             finally:

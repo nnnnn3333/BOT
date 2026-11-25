@@ -86,7 +86,7 @@ async def main() -> None:
 
     try:
         await bot.set_my_commands(COMMANDS)
-        log.info("Бот запущен")
+        log.info("Бот запущен. Нажатия нижнего меню удаляются перед открытием экрана.")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         scheduler.shutdown(wait=False)

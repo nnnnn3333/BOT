@@ -19,6 +19,7 @@ from config import Settings
 from database import Database
 from utils import esc
 from handlers.ui import HEADER, show_text, show_card
+from handlers.navigation import menu_text
 from handlers.section_headers import SectionHeader
 from workspace_db import (add_deadline, create_section, delete_item, get_item, get_section,
                           list_deadlines, list_items, list_sections, parse_datetime,
@@ -126,18 +127,18 @@ async def send_menu(message: Message) -> None:
 
 @router.message(Command("start"))
 @router.message(Command("menu"))
-@router.message(F.text == "🏠 Меню")
+@router.message(F.text.func(menu_text) == menu_text("🏠 Меню"))
 async def cmd_menu(message: Message) -> None:
     await send_menu(message)
 
 
-@router.message(F.text == "🗄 Резервная копия")
+@router.message(F.text.func(menu_text) == menu_text("🗄 Резервная копия"))
 async def backup_button(message: Message, db: Database, settings: Settings) -> None:
     from handlers.common import cmd_backup
     await cmd_backup(message, db, settings)
 
 
-@router.message(F.text == "❓ Помощь")
+@router.message(F.text.func(menu_text) == menu_text("❓ Помощь"))
 async def help_button(message: Message, db: Database) -> None:
     async with db.conn.execute("SELECT value FROM work_system WHERE key='last_local_backup'") as cursor:
         backup = await cursor.fetchone()
@@ -153,7 +154,7 @@ async def help_button(message: Message, db: Database) -> None:
 
 
 @router.message(Command("cancel"))
-@router.message(F.text == "❌ Отмена")
+@router.message(F.text.func(menu_text) == menu_text("❌ Отмена"))
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await show_text(message, "Действие отменено.", reply_markup=MENU)
@@ -170,14 +171,14 @@ async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
     return "<b>🗂 База знаний</b>\n\nВыбери раздел или открой последние записи.", kb.as_markup()
 
 
-@router.message(F.text == "🗂 База знаний")
+@router.message(F.text.func(menu_text) == menu_text("🗂 База знаний"))
 @router.message(Command("sections"))
 async def cmd_sections(message: Message, db: Database) -> None:
     text, markup = await browse_roots(db)
     await show_text(message, text, reply_markup=markup, header=HEADER)
 
 
-@router.message(F.text == "➕ Добавить")
+@router.message(F.text.func(menu_text) == menu_text("➕ Добавить"))
 async def cmd_add(message: Message) -> None:
     await show_text(message,
         "<b>Новая запись</b>\n\nПерешли сообщение, скриншот или файл в этот чат. "
@@ -186,7 +187,7 @@ async def cmd_add(message: Message) -> None:
     )
 
 
-@router.message(F.text == "🔎 Поиск")
+@router.message(F.text.func(menu_text) == menu_text("🔎 Поиск"))
 async def ask_search(message: Message, state: FSMContext) -> None:
     await state.set_state(SearchInput.query)
     await show_text(message, "Введи товар, цену, название акции, условие или дату (например, 2026-12-01).\n/cancel — отмена.")
@@ -256,7 +257,7 @@ async def show_deadlines(message: Message, db: Database, settings: Settings) -> 
     await show_text(message, text, reply_markup=markup)
 
 
-@router.message(F.text == "📅 Дедлайны")
+@router.message(F.text.func(menu_text) == menu_text("📅 Дедлайны"))
 @router.message(Command("deadlines"))
 async def deadlines_command(message: Message, db: Database, settings: Settings) -> None:
     await show_deadlines(message, db, settings)
@@ -312,7 +313,7 @@ async def deadline_date(message: Message, state: FSMContext, db: Database, setti
     await show_text(message, f"✅ Дедлайн создан: {esc(data['title'])}\n{when:%d.%m.%Y %H:%M}", reply_markup=MENU)
 
 
-@router.message(F.text == "⏱ Таймеры")
+@router.message(F.text.func(menu_text) == menu_text("⏱ Таймеры"))
 async def cmd_timer_menu(message: Message, db: Database, state: FSMContext) -> None:
     async with db.conn.execute(
         "SELECT id,task_name,status FROM timings WHERE status IN ('new','running','paused') ORDER BY id DESC LIMIT 6"
@@ -338,7 +339,7 @@ async def timer_name(message: Message, db: Database, state: FSMContext) -> None:
     await show_text(message, render_timer(await db.get_timing(timer_id)), reply_markup=timer_keyboard(timer_id))
 
 
-@router.message(F.text == "📊 Отчёт")
+@router.message(F.text.func(menu_text) == menu_text("📊 Отчёт"))
 async def stats_menu(message: Message, db: Database, settings: Settings) -> None:
     from handlers.timers import cmd_stats
     await cmd_stats(message, db, settings)

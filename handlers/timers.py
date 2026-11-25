@@ -16,7 +16,6 @@ from config import Settings
 from database import Database
 from reports import build_weekly_report, total_duration_label
 from handlers.ui import show_text
-from handlers.navigation import preserve_messages
 from utils import esc, fmt_duration
 
 router = Router(name="timers")
@@ -111,8 +110,7 @@ async def cmd_stats(message: Message, db: Database, settings: Settings) -> None:
 
     data = await asyncio.to_thread(build_weekly_report, rows, settings.tz)
     today = datetime.now(settings.tz).strftime("%Y-%m-%d")
-    with preserve_messages():
-        await message.answer_document(
-            BufferedInputFile(data, filename=f"timings_{today}.xlsx"),
-            caption=f"📊 Тайминги за {REPORT_DAYS} дней · всего {total_duration_label(rows)}",
-        )
+    await message.answer_document(
+        BufferedInputFile(data, filename=f"timings_{today}.xlsx"),
+        caption=f"📊 Тайминги за {REPORT_DAYS} дней · всего {total_duration_label(rows)}",
+    )

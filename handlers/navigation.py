@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 
 from aiogram import BaseMiddleware
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramAPIError, TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter, TelegramServerError,
+)
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
 log = logging.getLogger(__name__)
@@ -26,10 +28,18 @@ def command_name(text):
     return text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
 
 
+def menu_text(text: str | None) -> str:
+    if not text:
+        return ""
+    # Some keyboards include a variation selector after the same emoji.
+    return " ".join(text.replace("\ufe0e", "").replace("\ufe0f", "").split())
+
+
 def is_navigation(text):
     from handlers.workspace import MENU
-    labels = {button.text for row in MENU.keyboard for button in row}
-    return text in labels or text in {"🏠 Меню", "❌ Отмена"} or command_name(text) in COMMANDS
+    labels = {menu_text(button.text) for row in MENU.keyboard for button in row}
+    labels.update({menu_text("🏠 Меню"), menu_text("❌ Отмена")})
+    return menu_text(text) in labels or command_name(text.strip()) in COMMANDS
 
 
 @dataclass
@@ -117,6 +127,10 @@ class ScreenNavigation(BaseMiddleware):
                         (screen.chat, message.message_id),
                     )
                     await self.db.conn.commit()
+                navigation_input = incoming is not None and is_navigation(incoming.text or "")
+                if navigation_input:
+                    # The button bubble is independent of rendering or cleaning the next screen.
+                    await self.remove(data["bot"], screen.chat, incoming.message_id)
                 result = await handler(event, data)
                 if screen.messages:
                     state = data.get("state")
@@ -133,23 +147,34 @@ class ScreenNavigation(BaseMiddleware):
                                                        disable_notification=True)
                         _keyboards[screen.chat] = mode
                     await self.clean(data["bot"], screen)
-                if incoming and (screen.saved_input or is_navigation((incoming.text or "").strip())):
+                if incoming and screen.saved_input and not navigation_input:
                     await self.remove(data["bot"], screen.chat, incoming.message_id)
                 return result
             finally:
                 _current.reset(token)
 
     async def remove(self, bot, chat, message):
-        try:
-            await bot.delete_message(chat_id=chat, message_id=message)
-        except (TelegramBadRequest, TelegramForbiddenError) as error:
-            if isinstance(error, TelegramBadRequest):
-                reason = str(error).lower()
-                if "message to delete not found" in reason or "message can't be deleted" in reason:
+        for attempt in range(2):
+            try:
+                return await bot.delete_message(chat_id=chat, message_id=message)
+            except TelegramAPIError as error:
+                if isinstance(error, TelegramBadRequest) and "message to delete not found" in error.message.lower():
                     return True
-            log.info("Telegram refused UI cleanup: %s", type(error).__name__)
-            return False
-        return True
+                delay = None
+                if isinstance(error, (TelegramNetworkError, TelegramServerError)):
+                    delay = 0.25
+                elif isinstance(error, TelegramRetryAfter) and error.retry_after <= 2:
+                    delay = error.retry_after
+                if attempt == 0 and delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                reason = error.message if isinstance(error, TelegramBadRequest) else type(error).__name__
+                log.warning("Telegram не удалил сообщение %s: %s", message, reason)
+                if isinstance(error, TelegramBadRequest):
+                    # Aged messages can't be deleted and should stop accumulating in ui_messages.
+                    return "message can't be deleted" in error.message.lower()
+                return False
+        return False
 
     async def clean(self, bot, screen):
         async with self.db.conn.execute(

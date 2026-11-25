@@ -155,8 +155,8 @@ async def show_card(message, row, settings, markup, text):
 
 class NavigationMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        from handlers.navigation import is_navigation, command_name
-        text = (event.text or "").strip()
+        from handlers.navigation import is_navigation, command_name, menu_text
+        text = menu_text(event.text)
         command = command_name(text)
         if command in {"/start", "/menu"} or text == "🏠 Меню":
             chat = event.chat.id
