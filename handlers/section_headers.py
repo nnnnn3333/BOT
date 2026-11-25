@@ -9,8 +9,12 @@ from aiogram.types import BufferedInputFile
 
 @dataclass(frozen=True)
 class SectionHeader:
-    id: int
+    id: int | None
     name: str
+
+
+WORKBOT_HEADER = SectionHeader(None, "Рабочая база")
+KNOWLEDGE_HEADER = SectionHeader(None, "База знаний")
 
 
 PALETTES = (
@@ -32,12 +36,12 @@ def _font(size: int, bold: bool = False):
 
 @lru_cache(maxsize=64)
 def _jpeg(header: SectionHeader) -> bytes:
-    background, accent = PALETTES[header.id % len(PALETTES)]
+    background, accent = PALETTES[(header.id or 0) % len(PALETTES)]
     image = Image.new("RGB", (1040, 268), background)
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle((46, 45, 57, 222), radius=5, fill=accent)
-    draw.text((83, 51), "WORKBOT   /   " + str(header.id).zfill(2),
-              font=_font(26, bold=True), fill=accent)
+    brand = "WORKBOT" if header.id is None else f"WORKBOT   /   {header.id:02d}"
+    draw.text((83, 51), brand, font=_font(26, bold=True), fill=accent)
     title_font = _font(62, bold=True)
     title = header.name
     while len(title) > 1 and draw.textlength(title, font=title_font) > 720:
@@ -53,4 +57,5 @@ def _jpeg(header: SectionHeader) -> bytes:
 
 
 def header_upload(header: SectionHeader) -> BufferedInputFile:
-    return BufferedInputFile(_jpeg(header), filename=f"section-{header.id}.jpg")
+    filename = "workbot-header.jpg" if header.id is None else f"section-{header.id}.jpg"
+    return BufferedInputFile(_jpeg(header), filename=filename)

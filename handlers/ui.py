@@ -1,19 +1,17 @@
 """Single navigation message with a media header."""
 import asyncio
 from collections import defaultdict
-from pathlib import Path
 from collections import OrderedDict
 from uuid import uuid4
 from aiogram import BaseMiddleware, Router, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, InputMediaPhoto, Message, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from utils import resolve_storage_path
-from handlers.section_headers import SectionHeader, header_upload
+from handlers.section_headers import SectionHeader, WORKBOT_HEADER, header_upload
 
 _screens = {}
 _media = set()
 _locks = defaultdict(asyncio.Lock)
-HEADER = Path(__file__).with_name("workbot-header.png")
 router = Router(name="screen_pages")
 _pages = OrderedDict()
 
@@ -81,7 +79,7 @@ async def _render(message, text, markup, photo=None, page=None):
     async with _locks[chat]:
         previous = _previous(message)
         is_media = previous and (chat, previous) in _media
-        photo = photo or (HEADER if is_media else None)
+        photo = photo or (WORKBOT_HEADER if is_media else None)
         if page is None:
             from handlers.text_pages import split_html
             chunks = split_html(text, 900)

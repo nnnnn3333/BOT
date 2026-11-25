@@ -18,9 +18,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Settings
 from database import Database
 from utils import esc
-from handlers.ui import HEADER, show_text, show_card
+from handlers.ui import show_text, show_card
 from handlers.navigation import menu_text
-from handlers.section_headers import SectionHeader
+from handlers.section_headers import KNOWLEDGE_HEADER, SectionHeader
 from workspace_db import (add_deadline, create_section, delete_item, get_item, get_section,
                           list_deadlines, list_items, list_sections, parse_datetime,
                           remove_deadline, search_items, set_deadline_done, update_item,
@@ -175,7 +175,7 @@ async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
 @router.message(Command("sections"))
 async def cmd_sections(message: Message, db: Database) -> None:
     text, markup = await browse_roots(db)
-    await show_text(message, text, reply_markup=markup, header=HEADER)
+    await show_text(message, text, reply_markup=markup, header=KNOWLEDGE_HEADER)
 
 
 @router.message(F.text.func(menu_text) == menu_text("➕ Добавить"))
@@ -471,7 +471,7 @@ async def section_rename(message: Message, state: FSMContext, db: Database, sett
     await state.clear()
     if not changed:
         text, markup = await browse_roots(db)
-        await show_text(message, text, reply_markup=markup, header=HEADER)
+        await show_text(message, text, reply_markup=markup, header=KNOWLEDGE_HEADER)
         return
     section = await get_section(db, section_id)
     text, markup = await section_screen(db, "section", section, 0, settings)
@@ -543,7 +543,7 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
     if a == "sections":
         await state.clear()
         title, kb = await browse_roots(db)
-        return await _show(cb, title, kb, header=HEADER)
+        return await _show(cb, title, kb, header=KNOWLEDGE_HEADER)
     if a == "root":
         await state.clear()
         await cb.answer()
@@ -558,7 +558,7 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
             return await cb.answer("Раздел больше не существует", show_alert=True)
         await remember_browse(db, cb.from_user.id, a, id_, page)
         text, markup = await section_screen(db, a, section, page, settings)
-        header = SectionHeader(id_, section["name"]) if section else HEADER
+        header = SectionHeader(id_, section["name"]) if section else KNOWLEDGE_HEADER
         return await _show(cb, text, markup, header=header)
     if a == "card":
         row = await get_item(db, id_)
