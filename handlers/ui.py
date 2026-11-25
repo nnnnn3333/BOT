@@ -6,8 +6,9 @@ from collections import OrderedDict
 from uuid import uuid4
 from aiogram import BaseMiddleware, Router, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import FSInputFile, BufferedInputFile, InputMediaPhoto, Message, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import BufferedInputFile, InputMediaPhoto, Message, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from utils import resolve_storage_path
+from handlers.section_headers import SectionHeader, header_upload
 
 _screens = {}
 _media = set()
@@ -92,7 +93,11 @@ async def _render(message, text, markup, photo=None, page=None):
         else:
             key,index = page
             chunks = _pages[key]["pages"]
-        upload = await asyncio.to_thread(photo_input, photo) if photo else None
+        upload = None
+        if isinstance(photo, SectionHeader):
+            upload = await asyncio.to_thread(header_upload, photo)
+        elif photo:
+            upload = await asyncio.to_thread(photo_input, photo)
         text = chunks[index]
         markup = page_markup(markup, key, index, len(chunks))
         if previous and not isinstance(markup, ReplyKeyboardMarkup):
@@ -131,24 +136,17 @@ async def _render(message, text, markup, photo=None, page=None):
 
 
 async def show_text(message: Message, text: str, **kwargs):
-    # Reply keyboards need a separate text message to restore the bottom menu.
-    if isinstance(kwargs.get("reply_markup"), ReplyKeyboardMarkup) and not _previous(message):
-        async with _locks[message.chat.id]:
-            previous = _previous(message)
-            if previous:
-                await _retire(message.bot, message.chat.id, previous)
-            sent = await message.answer(text, **kwargs)
-            _screens[message.chat.id] = sent.message_id
-            return sent
     markup = kwargs.get("reply_markup")
     if isinstance(markup, ReplyKeyboardMarkup):
         markup = None
-    return await _render(message, text, markup)
+    return await _render(message, text, markup, kwargs.get("header"))
 
 
 async def show_card(message, row, settings, markup, text):
     path = resolve_storage_path(settings.storage_dir, row["file_path"])
     photo = path if row["category"] == "screen" else None
+    if photo is None and row["current_section_id"] is not None:
+        photo = SectionHeader(row["current_section_id"], row["section_name"])
     from handlers.workspace import card_keyboard
     markup = card_keyboard(row["id"], bool(row["file_path"]), favorite=bool(row["favorite"]))
     return await _render(message, text, markup, photo)
@@ -157,17 +155,9 @@ async def show_card(message, row, settings, markup, text):
 
 class NavigationMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
-        commands = {
-            "/start", "/menu", "/cancel", "/sections", "/find", "/deadline",
-            "/deadlines", "/timer", "/stats", "/backup", "/help", "/reindex",
-        }
-        labels = {
-            "🔎 Поиск", "🗂 База знаний", "➕ Добавить", "📅 Дедлайны",
-            "⏱ Таймеры", "📊 Отчёт", "🏠 Меню", "❌ Отмена",
-            "🗄 Резервная копия", "❓ Помощь",
-        }
+        from handlers.navigation import is_navigation, command_name
         text = (event.text or "").strip()
-        command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
+        command = command_name(text)
         if command in {"/start", "/menu"} or text == "🏠 Меню":
             chat = event.chat.id
             _screens.pop(chat, None)
@@ -175,7 +165,7 @@ class NavigationMiddleware(BaseMiddleware):
             from handlers.navigation import _anchors, _keyboards
             _anchors.pop(chat, None)
             _keyboards.pop(chat, None)
-        if text in labels or command in commands:
+        if is_navigation(text):
             state = data.get("state")
             if state is not None:
                 await state.clear()

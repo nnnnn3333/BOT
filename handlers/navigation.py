@@ -16,6 +16,22 @@ _keyboards = {}
 _anchors = {}
 
 
+# Telegram requires a message to attach a persistent reply keyboard.
+KEYBOARD_CARRIER = "⠀"
+COMMANDS = {"/start", "/menu", "/cancel", "/sections", "/find", "/deadline",
+            "/deadlines", "/timer", "/stats", "/backup", "/help", "/reindex"}
+
+
+def command_name(text):
+    return text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
+
+
+def is_navigation(text):
+    from handlers.workspace import MENU
+    labels = {button.text for row in MENU.keyboard for button in row}
+    return text in labels or text in {"🏠 Меню", "❌ Отмена"} or command_name(text) in COMMANDS
+
+
 @dataclass
 class Screen:
     chat: int
@@ -43,9 +59,16 @@ class ScreenRequests(BaseRequestMiddleware):
         self.db = db
 
     async def __call__(self, make_request, bot, method):
-        result = await make_request(bot, method)
-        markup = getattr(method, "reply_markup", None)
         screen = _current.get()
+        try:
+            result = await make_request(bot, method)
+        except TelegramBadRequest as error:
+            if (screen and method.__api_method__ in {"editMessageText", "editMessageCaption", "editMessageMedia"}
+                    and getattr(method, "chat_id", None) == screen.chat
+                    and "message is not modified" in str(error).lower()):
+                screen.messages.add(method.message_id)
+            raise
+        markup = getattr(method, "reply_markup", None)
         if screen and isinstance(markup, ReplyKeyboardMarkup):
             labels = [button.text for row in markup.keyboard for button in row]
             _keyboards[screen.chat] = "input" if labels == ["❌ Отмена", "🏠 Меню"] else "menu"
@@ -56,9 +79,7 @@ class ScreenRequests(BaseRequestMiddleware):
         track = method.__api_method__ != "editMessageReplyMarkup"
         for message in messages:
             if track and isinstance(message, Message) and message.chat.id == screen.chat:
-                if isinstance(markup, ReplyKeyboardMarkup) and getattr(method, "text", "") in {
-                    "Меню", "Ввод данных · Отмена или возврат в меню"
-                }:
+                if isinstance(markup, ReplyKeyboardMarkup) and getattr(method, "text", None) == KEYBOARD_CARRIER:
                     _anchors[screen.chat] = message.message_id
                 screen.messages.add(message.message_id)
                 await self.db.conn.execute(
@@ -103,26 +124,17 @@ class ScreenNavigation(BaseMiddleware):
                     if _keyboards.get(screen.chat) != mode or screen.chat not in _anchors:
                         from handlers.workspace import MENU
                         keyboard = MENU
-                        prompt = "Меню"
                         if mode == "input":
                             keyboard = ReplyKeyboardMarkup(
                                 keyboard=[[KeyboardButton(text="❌ Отмена"), KeyboardButton(text="🏠 Меню")]],
                                 resize_keyboard=True, is_persistent=True, one_time_keyboard=False,
                             )
-                            prompt = "Ввод данных · Отмена или возврат в меню"
-                        await data["bot"].send_message(screen.chat, prompt, reply_markup=keyboard)
+                        await data["bot"].send_message(screen.chat, KEYBOARD_CARRIER, reply_markup=keyboard,
+                                                       disable_notification=True)
                         _keyboards[screen.chat] = mode
                     await self.clean(data["bot"], screen)
-                    if incoming:
-                        text = (incoming.text or "").strip()
-                        command = text.split(maxsplit=1)[0].split("@", 1)[0] if text else ""
-                        from handlers.workspace import MENU
-                        labels = {button.text for row in MENU.keyboard for button in row}
-                        labels.update({"🏠 Меню", "❌ Отмена"})
-                        commands = {"/start", "/menu", "/cancel", "/sections", "/find", "/deadline",
-                                    "/deadlines", "/timer", "/stats", "/backup", "/help", "/reindex"}
-                        if screen.saved_input or text in labels or command in commands:
-                            await self.remove(data["bot"], screen.chat, incoming.message_id)
+                if incoming and (screen.saved_input or is_navigation((incoming.text or "").strip())):
+                    await self.remove(data["bot"], screen.chat, incoming.message_id)
                 return result
             finally:
                 _current.reset(token)
@@ -131,6 +143,10 @@ class ScreenNavigation(BaseMiddleware):
         try:
             await bot.delete_message(chat_id=chat, message_id=message)
         except (TelegramBadRequest, TelegramForbiddenError) as error:
+            if isinstance(error, TelegramBadRequest):
+                reason = str(error).lower()
+                if "message to delete not found" in reason or "message can't be deleted" in reason:
+                    return True
             log.info("Telegram refused UI cleanup: %s", type(error).__name__)
             return False
         return True

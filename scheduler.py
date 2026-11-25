@@ -3,23 +3,21 @@ from __future__ import annotations
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from aiogram import Bot
-
-from backup import send_backup
+from backup import save_backup
 from config import Settings
 from database import Database
 
 
-def setup_scheduler(bot: Bot, db: Database, settings: Settings) -> AsyncIOScheduler:
+def setup_scheduler(db: Database, settings: Settings) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=settings.tz_name)
     scheduler.add_job(
-        send_backup,
+        save_backup,
         trigger=CronTrigger(
             hour=settings.backup_hour,
             minute=settings.backup_minute,
             timezone=settings.tz_name,
         ),
-        kwargs={"bot": bot, "db": db, "settings": settings},
+        kwargs={"db": db, "settings": settings},
         id="daily_backup",
         replace_existing=True,
         coalesce=True,

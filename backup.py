@@ -1,25 +1,19 @@
-"""Ежесуточный бэкап: work_base.db + storage/ -> zip -> Telegram."""
+"""Save SQLite and working files as a verified server-side archive."""
 from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
+import sqlite3
 import tempfile
 import zipfile
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from aiogram import Bot
-from aiogram.types import FSInputFile
-
-from config import TG_UPLOAD_LIMIT, Settings
+from config import Settings
 from database import Database
-from utils import esc
-from handlers.navigation import preserve_messages
 
 log = logging.getLogger(__name__)
-
-_PART_SIZE = 45 * 1024 * 1024  # запас до лимита 50 МБ
 _lock = asyncio.Lock()
 
 
@@ -32,72 +26,38 @@ def _write_zip(archive: Path, snapshot: Path, storage_dir: Path) -> None:
                     zf.write(path, Path("storage") / path.relative_to(storage_dir))
 
 
-def _split_if_needed(archive: Path) -> list[Path]:
-    """Архив > лимита Telegram режем на части .zip.001, .zip.002 ... (склейка через cat)."""
-    if archive.stat().st_size <= TG_UPLOAD_LIMIT - 1024 * 1024:
-        return [archive]
-    parts: list[Path] = []
-    with archive.open("rb") as src:
-        while chunk := src.read(_PART_SIZE):
-            part = archive.with_name(f"{archive.name}.{len(parts) + 1:03d}")
-            part.write_bytes(chunk)
-            parts.append(part)
-    archive.unlink()
-    return parts
+def _create_archive(archive: Path, snapshot: Path, storage: Path) -> None:
+    with closing(sqlite3.connect(snapshot)) as conn:
+        if conn.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            raise ValueError("Резервная база не прошла проверку")
+    _write_zip(archive, snapshot, storage)
+    with zipfile.ZipFile(archive) as checked:
+        if checked.testzip() is not None:
+            raise ValueError("Резервный архив не прошёл проверку")
 
 
-async def send_backup(bot: Bot, db: Database, settings: Settings) -> None:
-    """Собирает архив и шлёт админу. Ошибки не пробрасывает — сообщает в чат."""
+async def save_backup(db: Database, settings: Settings) -> Path | None:
     if _lock.locked():
-        await bot.send_message(settings.admin_id, "⏳ Бэкап уже выполняется.")
-        return
-
-    with preserve_messages():
-        await _send_backup(bot, db, settings)
-
-
-async def _send_backup(bot, db, settings):
+        return None
     async with _lock:
-        settings.tmp_dir.mkdir(parents=True, exist_ok=True)
-        workdir = Path(tempfile.mkdtemp(prefix="backup_", dir=settings.tmp_dir))
-        try:
-            stamp = datetime.now(settings.tz).strftime("%Y-%m-%d_%H%M")
+        destination = settings.backup_dir.resolve()
+        if destination.is_relative_to(settings.storage_dir.resolve()):
+            raise ValueError("BACKUP_DIR должен находиться вне STORAGE_DIR")
+        destination.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(settings.tz)
+        filename = f"workbot_backup_{now:%Y-%m-%d_%H%M%S_%f}.zip"
+        archive = destination / filename
+        with tempfile.TemporaryDirectory(prefix=".building_", dir=destination) as temp:
+            workdir = Path(temp)
             snapshot = workdir / "work_base.db"
-            archive = workdir / f"workbot_backup_{stamp}.zip"
-
+            partial = workdir / filename
             await db.snapshot(snapshot)
-            await asyncio.to_thread(_write_zip, archive, snapshot, settings.storage_dir)
-            with zipfile.ZipFile(archive) as checked:
-                if checked.testzip() is not None:
-                    raise ValueError("Повреждена резервная копия")
-            snapshot.unlink(missing_ok=True)
-            parts = await asyncio.to_thread(_split_if_needed, archive)
-
-            for index, part in enumerate(parts, start=1):
-                size_mb = part.stat().st_size / 1024 / 1024
-                caption = f"🗄 Бэкап {stamp} · {size_mb:.1f} МБ"
-                if len(parts) > 1:
-                    caption += (
-                        f"\nЧасть {index}/{len(parts)}. Склейка:\n"
-                        f"<code>cat workbot_backup_{stamp}.zip.* > workbot_backup_{stamp}.zip</code>"
-                    )
-                await bot.send_document(
-                    settings.admin_id,
-                    FSInputFile(part),
-                    caption=caption,
-                    request_timeout=600,
-                )
-            await db.conn.execute(
-                "INSERT OR REPLACE INTO work_system(key,value) VALUES ('last_backup',?)",
-                (datetime.now(settings.tz).isoformat(timespec="seconds"),),
-            )
-            await db.conn.commit()
-            log.info("Бэкап отправлен (%d файл(ов))", len(parts))
-        except Exception as exc:
-            log.exception("Бэкап не удался")
-            try:
-                await bot.send_message(settings.admin_id, f"❌ Бэкап не удался: {esc(exc)}")
-            except Exception:
-                log.exception("Не удалось уведомить об ошибке бэкапа")
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+            await asyncio.to_thread(_create_archive, partial, snapshot, settings.storage_dir)
+            partial.replace(archive)
+        await db.conn.execute(
+            "INSERT OR REPLACE INTO work_system(key,value) VALUES ('last_local_backup',?)",
+            (now.isoformat(timespec="seconds"),),
+        )
+        await db.conn.commit()
+        log.info("Резервная копия сохранена: %s", archive)
+        return archive

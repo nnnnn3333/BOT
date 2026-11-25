@@ -1,16 +1,19 @@
 """/start, /help и ручной запуск бэкапа."""
 from __future__ import annotations
 
-from aiogram import Bot, Router
+import logging
+
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from backup import send_backup
+from backup import save_backup
 from handlers.ui import show_text
 from config import Settings
 from database import Database
 
 router = Router(name="common")
+log = logging.getLogger(__name__)
 
 HELP_TEXT = (
     "<b>Личная рабочая база</b>\n\n"
@@ -24,7 +27,7 @@ HELP_TEXT = (
     "/find <code>запрос</code> — полнотекстовый поиск\n"
     "/timer <code>название</code> — таймер задачи (Старт / Пауза / Стоп)\n"
     "/stats — тайминги за неделю в .xlsx\n"
-    "/backup — прислать бэкап прямо сейчас (авто — раз в сутки)"
+    "/backup — сохранить копию на сервере (авто — раз в сутки)"
 )
 
 
@@ -34,6 +37,15 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("backup"))
-async def cmd_backup(message: Message, bot: Bot, db: Database, settings: Settings) -> None:
-    await show_text(message, "⏳ Собираю бэкап…")
-    await send_backup(bot, db, settings)
+async def cmd_backup(message: Message, db: Database, settings: Settings) -> None:
+    await show_text(message, "⏳ Создаю резервную копию…")
+    try:
+        archive = await save_backup(db, settings)
+    except Exception:
+        log.exception("Не удалось создать резервную копию")
+        await show_text(message, "⚠️ Не удалось сохранить копию. Проверь журнал на хостинге.")
+        return
+    if archive is None:
+        await show_text(message, "⏳ Резервная копия уже создаётся.")
+        return
+    await show_text(message, f"✅ Копия сохранена на сервере.\n<code>{archive.name}</code>")

@@ -9,6 +9,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import aiosqlite
+
 from database import Database
 from utils import build_fts_query, esc
 
@@ -116,28 +118,64 @@ async def initialize(db: Database) -> None:
         await db.conn.execute("ALTER TABLE work_item_meta ADD COLUMN ocr_processed INTEGER NOT NULL DEFAULT 0")
     async with db.conn.execute("SELECT COUNT(*) FROM work_sections") as cur:
         count = (await cur.fetchone())[0]
-    if count == 0:
+    async with db.conn.execute("SELECT 1 FROM work_system WHERE key='sections_initialized'") as cur:
+        seeded = await cur.fetchone()
+    if count == 0 and not seeded:
         for order, (parent, children) in enumerate(DEFAULT_SECTIONS.items()):
             section_id = await create_section(db, parent, None, order)
             for idx, child in enumerate(children):
                 await create_section(db, child, section_id, idx)
+    await db.conn.execute("INSERT OR IGNORE INTO work_system VALUES ('sections_initialized', '1')")
     await db.conn.commit()
 
 
-async def create_section(db: Database, name: str, parent_id: int | None = None, order: int = 0) -> int:
-    name = " ".join(name.strip().split())[:70]
+def section_name(raw: str) -> str:
+    name = " ".join(raw.split())[:70]
     if not name:
         raise ValueError("Название не может быть пустым")
+    return name
+
+
+async def rename_section(db: Database, section_id: int, raw: str) -> bool:
+    name = section_name(raw)
+    current = await get_section(db, section_id)
+    if current is None:
+        return False
+    siblings = await list_sections(db, current["parent_id"])
+    if any(row["id"] != section_id and row["name"].casefold() == name.casefold() for row in siblings):
+        raise ValueError("Раздел с таким названием уже есть")
+    await db.conn.execute("UPDATE work_sections SET name=? WHERE id=?", (name, section_id))
+    await db.conn.commit()
+    return True
+
+
+async def delete_section(db: Database, section_id: int) -> tuple[bool, int | None]:
+    # The scheduler and OCR share db.conn. Use a separate transaction so their
+    # commits cannot expose a partial move.
+    async with aiosqlite.connect(db.path) as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        async with conn.execute("SELECT parent_id FROM work_sections WHERE id=?", (section_id,)) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return False, None
+        parent_id = row[0]
+        await conn.execute("UPDATE work_item_meta SET section_id=? WHERE section_id=?", (parent_id, section_id))
+        await conn.execute("UPDATE work_sections SET parent_id=? WHERE parent_id=?", (parent_id, section_id))
+        await conn.execute("DELETE FROM work_browse WHERE action='section' AND section=?", (section_id,))
+        await conn.execute("DELETE FROM work_sections WHERE id=?", (section_id,))
+        await conn.commit()
+        return True, parent_id
+
+
+async def create_section(db: Database, name: str, parent_id: int | None = None, order: int = 0) -> int:
+    name = section_name(name)
     if parent_id is not None:
         parent = await get_section(db, parent_id)
         if parent is None or parent["parent_id"] is not None:
             raise ValueError("Подразделы могут быть только у корневых разделов")
-    async with db.conn.execute(
-        "SELECT id FROM work_sections WHERE parent_id IS ? AND lower(name)=lower(?)", (parent_id, name)
-    ) as cur:
-        existing = await cur.fetchone()
-    if existing:
-        return int(existing["id"])
+    for existing in await list_sections(db, parent_id):
+        if existing["name"].casefold() == name.casefold():
+            return existing["id"]
     async with db.conn.execute(
         "INSERT INTO work_sections(name,parent_id,sort_order) VALUES (?,?,?)", (name, parent_id, order)
     ) as cur:
@@ -163,6 +201,7 @@ async def get_item(db: Database, item_id: int):
     async with db.conn.execute("""
         SELECT i.*, m.section_id, COALESCE(m.price,'') AS price,
                m.valid_until, COALESCE(m.details,'') AS details,
+               s.id AS current_section_id,
                COALESCE(s.name,'Без раздела') AS section_name,
                s.parent_id AS section_parent_id,
                EXISTS(SELECT 1 FROM work_favorites f WHERE f.item_id=i.id) AS favorite
@@ -209,14 +248,15 @@ async def list_items(db: Database, section_id: int | None = None, page: int = 0,
         WHERE 1=1"""
     params: list[Any] = []
     if section_id is not None:
-        # При открытии корневого раздела также показываем карточки его подразделов.
-        sql += " AND (m.section_id=? OR m.section_id IN (SELECT id FROM work_sections WHERE parent_id=?))"
-        params.extend((section_id, section_id))
+        sql += " AND m.section_id=?"
+        params.append(section_id)
     today = today or datetime.now(timezone.utc).date().isoformat()
     if active_only:
         sql += " AND m.valid_until IS NOT NULL AND m.valid_until>=?"
         params.append(today)
-    if filter_name == "favorite":
+    if filter_name == "unfiled":
+        sql += " AND NOT EXISTS (SELECT 1 FROM work_sections s WHERE s.id=m.section_id)"
+    elif filter_name == "favorite":
         sql += " AND EXISTS(SELECT 1 FROM work_favorites f WHERE f.item_id=i.id)"
     elif filter_name in ("today", "tomorrow", "soon"):
         start = datetime.strptime(today, "%Y-%m-%d").date()

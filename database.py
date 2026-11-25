@@ -86,6 +86,10 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
 
     # ------------------------------------------------------------------ lifecycle
+    @property
+    def path(self) -> Path:
+        return self._path
+
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(self._path)

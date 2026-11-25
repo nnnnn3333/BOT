@@ -100,4 +100,41 @@ class Storage(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute('SELECT content FROM items WHERE id=?',(self.id,)).fetchone()[0],'Материал')
         self.assertEqual((restored/'storage/original.txt').read_text(encoding='utf-8'),'Original')
 
+    async def test_root_delete_preserves_child_and_archive_restores_files(self):
+        from types import SimpleNamespace
+        from contextlib import closing
+        from backup import save_backup
+        from workspace_db import create_section, delete_section, get_section, update_item
+
+        parent = await create_section(self.db, 'Папка')
+        child = await create_section(self.db, 'Подпапка', parent)
+        storage = self.root / 'storage'
+        storage.mkdir()
+        (storage / 'file.txt').write_bytes(b'attachment')
+        item = await self.db.add_item(category='file',title='Файл',file_path='file.txt')
+        await update_item(self.db,item,'section_id',child)
+        self.assertEqual(await delete_section(self.db,parent),(True,None))
+        self.assertIsNone((await get_section(self.db,child))['parent_id'])
+        self.assertEqual((await get_item(self.db,item))['section_id'],child)
+        settings = SimpleNamespace(tz=ZoneInfo('Europe/Kaliningrad'),storage_dir=storage,
+                                   backup_dir=self.root/'backups')
+        archive = await save_backup(self.db,settings)
+        self.assertEqual(archive.parent,settings.backup_dir)
+        restored = self.root/'restored.db'
+        with zipfile.ZipFile(archive) as contents:
+            restored.write_bytes(contents.read('work_base.db'))
+            self.assertEqual(contents.read('storage/file.txt'),b'attachment')
+        with closing(sqlite3.connect(restored)) as conn:
+            self.assertEqual(conn.execute('PRAGMA quick_check').fetchone()[0],'ok')
+            self.assertEqual(conn.execute('SELECT section_id FROM work_item_meta WHERE item_id=?',(item,)).fetchone(),(child,))
+
+    async def test_deleting_all_sections_does_not_recreate_defaults(self):
+        from workspace_db import list_sections, delete_section
+        while sections := await list_sections(self.db):
+            for section in sections:
+                await delete_section(self.db,section['id'])
+        await initialize(self.db)
+        self.assertEqual(await list_sections(self.db),[])
+
+
 if __name__ == '__main__': unittest.main()

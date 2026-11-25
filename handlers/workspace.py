@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from ocr_local import recognize
 
-from aiogram import F, Router, Bot
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.filters.callback_data import CallbackData
@@ -18,12 +18,13 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import Settings
 from database import Database
 from utils import esc
-from handlers.ui import show_text, show_card
+from handlers.ui import HEADER, show_text, show_card
+from handlers.section_headers import SectionHeader
 from workspace_db import (add_deadline, create_section, delete_item, get_item, get_section,
                           list_deadlines, list_items, list_sections, parse_datetime,
                           remove_deadline, search_items, set_deadline_done, update_item,
                           mark_ocr_processed, pending_screens, set_favorite, remember_browse,
-                          browse_context, reschedule_deadline)
+                          browse_context, reschedule_deadline, rename_section, delete_section)
 
 router = Router(name="workspace")
 
@@ -45,6 +46,7 @@ class EditInput(StatesGroup):
 
 class SectionInput(StatesGroup):
     name = State()
+    rename = State()
 
 
 class DeadlineInput(StatesGroup):
@@ -105,10 +107,11 @@ def card_text(row, settings: Settings) -> str:
     return "\n".join(lines)
 
 
-async def _show(cb: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+async def _show(cb: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None,
+                *, header=None) -> None:
     await cb.answer()
     if isinstance(cb.message, Message):
-        await show_text(cb.message, text, reply_markup=markup)
+        await show_text(cb.message, text, reply_markup=markup, header=header)
 
 
 async def send_menu(message: Message) -> None:
@@ -129,23 +132,23 @@ async def cmd_menu(message: Message) -> None:
 
 
 @router.message(F.text == "🗄 Резервная копия")
-async def backup_button(message: Message, bot: Bot, db: Database, settings: Settings) -> None:
+async def backup_button(message: Message, db: Database, settings: Settings) -> None:
     from handlers.common import cmd_backup
-    await cmd_backup(message, bot, db, settings)
+    await cmd_backup(message, db, settings)
 
 
 @router.message(F.text == "❓ Помощь")
 async def help_button(message: Message, db: Database) -> None:
-    async with db.conn.execute("SELECT value FROM work_system WHERE key='last_backup'") as cursor:
+    async with db.conn.execute("SELECT value FROM work_system WHERE key='last_local_backup'") as cursor:
         backup = await cursor.fetchone()
-    backup_status = esc(backup[0]) if backup else "ещё не отправлялась"
+    backup_status = esc(backup[0]) if backup else "ещё не сохранена"
     await show_text(
         message,
         "<b>❓ Помощь</b>\n\n"
         "Выбирайте действия в нижнем меню.\n"
         "Чтобы сохранить заметку, фото или документ, отправьте их в чат.\n"
         "При вводе данных нижнее меню заменяется кнопками отмены и возврата.\n\n"
-        f"Последняя отправленная резервная копия: {backup_status}",
+        f"Последняя сохранённая резервная копия: {backup_status}",
     )
 
 
@@ -163,7 +166,7 @@ async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
     kb.row(btn("🕓 Последние записи", "items"), btn("🟢 Сроки действуют", "active"))
     kb.row(btn("⭐ Избранное", "favorite"), btn("📅 Сроки сегодня", "today"))
     kb.row(btn("Завтра", "tomorrow"), btn("В ближайшие 3 дня", "soon"))
-    kb.row(btn("➕ Новый раздел", "newsec"))
+    kb.row(btn("📥 Без раздела", "unfiled"), btn("➕ Новый раздел", "newsec"))
     return "<b>🗂 База знаний</b>\n\nВыбери раздел или открой последние записи.", kb.as_markup()
 
 
@@ -171,7 +174,7 @@ async def browse_roots(db: Database) -> tuple[str, InlineKeyboardMarkup]:
 @router.message(Command("sections"))
 async def cmd_sections(message: Message, db: Database) -> None:
     text, markup = await browse_roots(db)
-    await show_text(message, text, reply_markup=markup)
+    await show_text(message, text, reply_markup=markup, header=HEADER)
 
 
 @router.message(F.text == "➕ Добавить")
@@ -412,10 +415,108 @@ async def edit_value(message: Message, state: FSMContext, db: Database, settings
                     card_text(item, settings))
 
 
+async def section_screen(db, action, section, page, settings):
+    id_ = section["id"] if section else 0
+    rows, more = await list_items(
+        db, section_id=id_ or None, page=page, active_only=(action == "active"),
+        filter_name=action, today=datetime.now(settings.tz).date().isoformat(),
+    )
+    kb = InlineKeyboardBuilder()
+    if section and section["parent_id"] is None:
+        for child in await list_sections(db, id_):
+            kb.row(btn(f"📂 {child['name']}", "section", child["id"]))
+    for row in rows:
+        kb.row(btn(f"📄 {_short(row['title'], 45)}", "card", row["id"]))
+    arrows = []
+    if page > 0:
+        arrows.append(btn("‹ Назад", action, id_, page - 1))
+    if more:
+        arrows.append(btn("Далее ›", action, id_, page + 1))
+    if arrows:
+        kb.row(*arrows)
+    if section:
+        if section["parent_id"] is None:
+            kb.row(btn("➕ Подраздел", "newsec", id_))
+        kb.row(btn("⚙️ Управление разделом", "secmanage", id_))
+        kb.row(btn("‹ Разделы", "sections" if section["parent_id"] is None else "section",
+                   section["parent_id"] or 0))
+    else:
+        kb.row(btn("‹ Разделы", "sections"))
+    titles = {"unfiled": "📥 Без раздела", "favorite": "⭐ Избранное", "today": "📅 Сроки сегодня",
+              "tomorrow": "📅 Сроки завтра", "soon": "📅 Сроки в ближайшие 3 дня"}
+    if section:
+        title = f"📁 {esc(section['name'])}"
+    elif action == "active":
+        title = "🟢 Действующие предложения"
+    else:
+        title = titles.get(action, "📄 Последние записи")
+    description = "В этом разделе нет записей."
+    if rows:
+        description = "Выберите запись."
+        if page or more:
+            description = f"Страница {page + 1} · {description}"
+    return f"<b>{title}</b>\n\n{description}", kb.as_markup()
+
+
+@router.message(SectionInput.rename)
+async def section_rename(message: Message, state: FSMContext, db: Database, settings: Settings) -> None:
+    section_id = (await state.get_data()).get("section_id")
+    try:
+        changed = bool(section_id) and await rename_section(db, section_id, message.text or "")
+    except ValueError as error:
+        await show_text(message, esc(error), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [btn("Отмена", "secmanage", section_id)]]))
+        return
+    await state.clear()
+    if not changed:
+        text, markup = await browse_roots(db)
+        await show_text(message, text, reply_markup=markup, header=HEADER)
+        return
+    section = await get_section(db, section_id)
+    text, markup = await section_screen(db, "section", section, 0, settings)
+    await show_text(message, text, reply_markup=markup, header=SectionHeader(section_id, section["name"]))
+
+
 @router.callback_query(WS.filter())
 async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
                            settings: Settings, state: FSMContext) -> None:
     a, id_, page, item_id = callback_data.action, callback_data.id, callback_data.page, callback_data.item
+    if not isinstance(cb.message, Message):
+        return await cb.answer("Открой бота и повтори действие.", show_alert=True)
+    if a in {"secmanage", "secrename", "secdelask", "secdel"}:
+        # All routes already pass AdminOnlyMiddleware before reaching this handler.
+        section = await get_section(db, id_)
+        if section is None:
+            return await cb.answer("Раздел уже удалён.", show_alert=True)
+        await state.clear()
+        header = SectionHeader(id_, section["name"])
+        back = [btn("‹ К разделу", "section", id_)]
+        if a == "secmanage":
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [btn("✏️ Переименовать", "secrename", id_)],
+                [btn("🗑 Удалить раздел", "secdelask", id_)], back,
+            ])
+            return await _show(cb, f"<b>{esc(section['name'])}</b>\nУправление разделом", markup, header=header)
+        if a == "secrename":
+            await state.set_state(SectionInput.rename)
+            await state.update_data(section_id=id_)
+            return await _show(cb, "Введи новое название.", InlineKeyboardMarkup(inline_keyboard=[back]),
+                               header=header)
+        if a == "secdelask":
+            parent = await get_section(db, section["parent_id"]) if section["parent_id"] else None
+            destination = parent["name"] if parent else "Без раздела"
+            text = f"<b>Удалить «{esc(section['name'])}»?</b>\nЗаписи переместятся в «{esc(destination)}»."
+            if not parent and await list_sections(db, id_):
+                text += "\nПодразделы станут самостоятельными разделами."
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [btn("Удалить раздел", "secdel", id_), btn("Отмена", "secmanage", id_)],
+            ])
+            return await _show(cb, text, markup, header=header)
+        deleted, parent_id = await delete_section(db, id_)
+        if not deleted:
+            return await cb.answer("Раздел уже удалён.", show_alert=True)
+        target = WS(action="section", id=parent_id) if parent_id else WS(action="sections")
+        return await workspace_button(cb, target, db, settings, state)
     if a == "return":
         context = await browse_context(db, cb.from_user.id)
         if context and context["action"] == "search":
@@ -426,7 +527,7 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
             target = WS(action=context["action"], id=context["section"], page=context["page"])
         else:
             row = await get_item(db, id_)
-            target = WS(action="section", id=row["section_id"]) if row and row["section_id"] else WS(action="sections")
+            target = WS(action="section", id=row["section_id"]) if row and row["current_section_id"] else WS(action="sections")
         return await workspace_button(cb, target, db, settings, state)
     if a in {"star", "unstar"}:
         await set_favorite(db, id_, a == "star")
@@ -441,50 +542,23 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
     if a == "sections":
         await state.clear()
         title, kb = await browse_roots(db)
-        return await _show(cb, title, kb)
+        return await _show(cb, title, kb, header=HEADER)
     if a == "root":
         await state.clear()
         await cb.answer()
         if isinstance(cb.message, Message):
             await send_menu(cb.message)
         return
-    if a in {"section", "items", "active", "card", "deadlines", "favorite", "today", "tomorrow", "soon"}:
+    if a in {"section", "items", "active", "card", "deadlines", "favorite", "today", "tomorrow", "soon", "unfiled"}:
         await state.clear()
-    if a in {"section", "items", "active", "favorite", "today", "tomorrow", "soon"}:
+    if a in {"section", "items", "active", "favorite", "today", "tomorrow", "soon", "unfiled"}:
         section = await get_section(db, id_) if id_ else None
         if id_ and not section:
             return await cb.answer("Раздел больше не существует", show_alert=True)
         await remember_browse(db, cb.from_user.id, a, id_, page)
-        rows, more = await list_items(
-            db, section_id=id_ or None, page=page, active_only=(a == "active"),
-            filter_name=a, today=datetime.now(settings.tz).date().isoformat(),
-        )
-        kb = InlineKeyboardBuilder()
-        if section and section["parent_id"] is None:
-            for child in await list_sections(db, id_):
-                kb.row(btn(f"📂 {child['name']}", "section", child["id"]))
-        for row in rows:
-            kb.row(btn(f"📄 {_short(row['title'], 45)}", "card", row["id"]))
-        arrows = []
-        if page > 0:
-            arrows.append(btn("‹ Назад", a, id_, page - 1))
-        if more:
-            arrows.append(btn("Далее ›", a, id_, page + 1))
-        if arrows:
-            kb.row(*arrows)
-        if section:
-            if section["parent_id"] is None:
-                kb.row(btn("➕ Подраздел", "newsec", id_))
-            kb.row(btn("‹ Разделы", "sections" if section["parent_id"] is None else "section",
-                       section["parent_id"] or 0))
-        else:
-            kb.row(btn("‹ Разделы", "sections"))
-        titles = {"favorite": "⭐ Избранное", "today": "📅 Сроки сегодня",
-                  "tomorrow": "📅 Сроки завтра", "soon": "📅 Сроки в ближайшие 3 дня"}
-        title = (titles[a] if a in titles else "🟢 Действующие предложения" if a == "active" else
-                 f"📁 {esc(section['name'])}" if section else "📄 Последние записи")
-        description = f"Страница {page + 1} · Выберите запись." if rows else "Записей пока нет."
-        return await _show(cb, f"<b>{title}</b>\n\n{description}", kb.as_markup())
+        text, markup = await section_screen(db, a, section, page, settings)
+        header = SectionHeader(id_, section["name"]) if section else HEADER
+        return await _show(cb, text, markup, header=header)
     if a == "card":
         row = await get_item(db, id_)
         if not row:
@@ -519,6 +593,8 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
             kb.row(btn(f"📁 {section['name']}", "pickroot", section["id"], item=item_id))
         return await _show(cb, f"<b>Выбери раздел для записи #{item_id}</b>", kb.as_markup())
     if a == "pickroot":
+        if not await get_section(db, id_) or not await get_item(db, item_id):
+            return await cb.answer("Раздел или запись уже удалены.", show_alert=True)
         kb = InlineKeyboardBuilder()
         kb.row(btn("📁 Сохранить прямо сюда", "setsection", id_, item=item_id))
         for child in await list_sections(db, id_):
@@ -526,7 +602,11 @@ async def workspace_button(cb: CallbackQuery, callback_data: WS, db: Database,
         kb.row(btn("⬅️ Выбрать другой", "choose", item=item_id))
         return await _show(cb, "Выбери подраздел (или сохрани в корневой раздел).", kb.as_markup())
     if a == "setsection":
-        await update_item(db, item_id, "section_id", id_)
+        if not await get_section(db, id_):
+            return await cb.answer("Раздел уже удалён.", show_alert=True)
+        if not await update_item(db, item_id, "section_id", id_):
+            return await cb.answer("Запись уже удалена.", show_alert=True)
+        await remember_browse(db, cb.from_user.id, "section", id_)
         row = await get_item(db, item_id)
         await cb.answer()
         return await show_card(cb.message, row, settings, card_keyboard(item_id, bool(row["file_path"])),

@@ -77,7 +77,7 @@ async def main() -> None:
     for router in get_routers():
         dp.include_router(router)
 
-    scheduler = setup_scheduler(bot, db, settings)
+    scheduler = setup_scheduler(db, settings)
     scheduler.add_job(notify_deadlines, 'interval', minutes=1,
                       args=[bot, db, settings], id='deadline_reminders',
                       replace_existing=True, max_instances=1, coalesce=True)

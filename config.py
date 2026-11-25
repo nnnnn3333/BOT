@@ -26,6 +26,7 @@ class Settings:
     db_path: Path
     storage_dir: Path
     tmp_dir: Path
+    backup_dir: Path
     tz_name: str
     tz: ZoneInfo
     backup_hour: int
@@ -71,11 +72,14 @@ def load_settings() -> Settings:
 
     data_dir = _path_from_env("DATA_DIR", ".") if os.getenv("DATA_DIR", "").strip() else BASE_DIR
 
+    db_path = _path_from_env("DB_PATH", str(data_dir / "work_base.db"))
+
     return Settings(
         bot_token=token,
         admin_id=int(admin_raw),
-        db_path=_path_from_env("DB_PATH", str(data_dir / "work_base.db")),
+        db_path=db_path,
         storage_dir=_path_from_env("STORAGE_DIR", str(data_dir / "storage")),
+        backup_dir=_path_from_env("BACKUP_DIR", str(db_path.parent / "backups")),
         tmp_dir=_path_from_env("TMP_DIR", str(data_dir / "tmp")),
         tz_name=tz_name,
         tz=tz,
